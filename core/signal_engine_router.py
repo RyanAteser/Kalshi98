@@ -4,7 +4,7 @@ signal_engine_router.py — Hot-swappable wrapper around all signal engines.
 Engines:
   momentum   — Momentum crossover at 52c (coin-flip games)
   resolution — Near-certain resolution scalper at 97c
-  simple96   — Buy 10 contracts at 96c, wait for cash, repeat
+  simple96   — Buy YES or NO at 97–99c, stop loss at 90c
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ class SignalEngineRouter:
     ENGINE_LABELS = {
         "momentum":   "Momentum Crossover (52c)",
         "resolution": "Resolution Scalper (97c)",
-        "simple96":   "Simple Buy (96c)",
+        "simple96":   "Simple Buy (97c)",
     }
 
     def __init__(self, config: Config) -> None:
