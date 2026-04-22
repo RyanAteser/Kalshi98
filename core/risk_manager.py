@@ -99,9 +99,14 @@ class RiskManager:
 
         # Local guard — Kalshi /positions API lags several seconds after fill.
         # Without this, the poller phantom-closes and we double-buy.
+        # If the DB shows no open position, the guard is stale (position settled via
+        # poller without going through _handle_exit). Clear it so re-entry works.
         if signal.ticker in self._local_open_tickers:
-            logger.debug("[%s] Entry skipped: local position guard (Kalshi API lag)", signal.ticker)
-            return
+            logger.debug(
+                "[%s] Clearing stale local guard — DB shows no open position (settled via poller)",
+                signal.ticker,
+            )
+            self._local_open_tickers.discard(signal.ticker)
 
         # Check failed-order cooldown
         cooldown_until = self._order_cooldown.get(signal.ticker, 0)
@@ -199,7 +204,7 @@ class RiskManager:
                     market_id=signal.market_id,
                     entry_price=best_ask,
                     quantity=qty,
-                    stop_loss=0.82,
+                    stop_loss=0.90,
                 )
                 self._signal_engine.mark_position_open(
                     ticker=signal.ticker,
@@ -316,7 +321,26 @@ class RiskManager:
         )
 
         if not result.success:
-            logger.error("[%s] Sell failed: %s", signal.ticker, result.error)
+            err_str = str(result.error or "").lower()
+            if "market_closed" in err_str or "market closed" in err_str:
+                # Market settled before we could sell — treat as a settlement win.
+                # The poller would eventually do this, but doing it now re-arms the
+                # engine immediately so we can trade the next market without delay.
+                logger.warning(
+                    "[%s] Sell blocked: market already closed — recording as settlement",
+                    signal.ticker,
+                )
+                self._db.close_position(pos_id)
+                self._signal_engine.mark_position_closed(signal.ticker)
+                self._local_open_tickers.discard(signal.ticker)
+                pnl = (1.0 - entry_price) * quantity
+                self._sizer.record_result(pnl)
+                event_bus.push_trade(TradeEvent(
+                    ticker=signal.ticker, side="SELL",
+                    price=1.0, qty=quantity, pnl=pnl,
+                ))
+            else:
+                logger.error("[%s] Sell failed: %s", signal.ticker, result.error)
             return
 
         exit_price = result.filled_price or sell_price

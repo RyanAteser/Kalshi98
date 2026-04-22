@@ -1,0 +1,18 @@
+[Unit]
+Description=Kalshi BTC 15m Trader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Kalshi98
+EnvironmentFile=/home/ubuntu/Kalshi98/.env
+ExecStart=/home/ubuntu/Kalshi98/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
