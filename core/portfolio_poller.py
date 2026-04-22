@@ -139,7 +139,7 @@ class PortfolioPoller(threading.Thread):
                     market_id=market_id,
                     entry_price=entry_px or 0.97,
                     quantity=qty,
-                    stop_loss=0.82,
+                    stop_loss=0.90,
                 )
 
             e96 = self._signal_engine._simple96

@@ -35,6 +35,7 @@ class Simple96Engine:
 
     def _reset(self) -> None:
         self._has_position     = False
+        self._pending_entry    = False
         self._position_ticker: Optional[str]   = None
         self._position_side:   Optional[str]   = None
         self._entry_price:     Optional[float] = None
@@ -60,6 +61,7 @@ class Simple96Engine:
     ) -> None:
         with self._lock:
             self._has_position    = True
+            self._pending_entry   = False
             self._position_ticker = ticker
             self._entry_price     = entry_price
             self._position_id     = position_id
@@ -148,9 +150,11 @@ class Simple96Engine:
                         )
                     return None
 
-            # ── STANDING BY: suppress during cooldown ─────────────────
-            # Silent skip — no log spam, no wasted signal object
-            if self._in_cooldown(ticker):
+            # ── STANDING BY: suppress during cooldown or pending entry ───
+            # _pending_entry stays True from signal generation until
+            # mark_position_open() is called, blocking duplicate signals
+            # in the window before the optimistic lock takes effect.
+            if self._pending_entry or self._in_cooldown(ticker):
                 return None
 
             # ── Check YES side (buy YES when BTC is going UP) ─────────
@@ -187,7 +191,8 @@ class Simple96Engine:
                 )
                 return None
 
-            self._position_side = side
+            self._position_side  = side
+            self._pending_entry  = True   # block further signals until mark_position_open()
 
         logger.info(
             "[97c] SIGNAL: %s  side=%s  entry=%.4f  (yes_ask=%s no_ask=%s)",

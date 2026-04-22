@@ -99,9 +99,14 @@ class RiskManager:
 
         # Local guard — Kalshi /positions API lags several seconds after fill.
         # Without this, the poller phantom-closes and we double-buy.
+        # If the DB shows no open position, the guard is stale (position settled via
+        # poller without going through _handle_exit). Clear it so re-entry works.
         if signal.ticker in self._local_open_tickers:
-            logger.debug("[%s] Entry skipped: local position guard (Kalshi API lag)", signal.ticker)
-            return
+            logger.debug(
+                "[%s] Clearing stale local guard — DB shows no open position (settled via poller)",
+                signal.ticker,
+            )
+            self._local_open_tickers.discard(signal.ticker)
 
         # Check failed-order cooldown
         cooldown_until = self._order_cooldown.get(signal.ticker, 0)
@@ -199,7 +204,7 @@ class RiskManager:
                     market_id=signal.market_id,
                     entry_price=best_ask,
                     quantity=qty,
-                    stop_loss=0.82,
+                    stop_loss=0.90,
                 )
                 self._signal_engine.mark_position_open(
                     ticker=signal.ticker,
