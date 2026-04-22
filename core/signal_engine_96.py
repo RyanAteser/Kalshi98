@@ -1,5 +1,5 @@
 """
-signal_engine_96.py — Buy YES or NO contracts at 96–98c. Stop out at 82c.
+signal_engine_96.py — Buy YES or NO contracts at 97–99c. Stop out at 90c.
 
 Hardened version:
   - Strict threshold validation with explicit bounds
@@ -21,9 +21,9 @@ from core.models import Signal, SignalType
 logger = logging.getLogger(__name__)
 
 # ── Thresholds ────────────────────────────────────────────────────────
-BUY_MIN   = 0.96      # lower bound: price must be >= this to trigger entry
-BUY_MAX   = 0.98      # upper bound: price must be <= this to trigger entry
-STOP_LOSS = 0.82      # exit if price drops to this or below
+BUY_MIN   = 0.97      # lower bound: price must be >= this to trigger entry
+BUY_MAX   = 0.99      # upper bound: price must be <= this to trigger entry
+STOP_LOSS = 0.90      # exit if price drops to this or below
 
 
 class Simple96Engine:
@@ -46,7 +46,7 @@ class Simple96Engine:
         """Block new entry signals for this ticker for `duration` seconds."""
         with self._lock:
             self._cooldown_until[ticker] = time.time() + duration
-        logger.info("[96c] Cooldown: %s blocked for %.0fs", ticker, duration)
+        logger.info("[97c] Cooldown: %s blocked for %.0fs", ticker, duration)
 
     def _in_cooldown(self, ticker: str) -> bool:
         until = self._cooldown_until.get(ticker, 0)
@@ -66,14 +66,14 @@ class Simple96Engine:
             if side is not None:
                 self._position_side = side
         logger.info(
-            "[96c] IN: %s @ %.4f  side=%s  id=%d",
+            "[97c] IN: %s @ %.4f  side=%s  id=%d",
             ticker, entry_price, self._position_side, position_id,
         )
 
     def mark_position_closed(self, ticker: str) -> None:
         with self._lock:
             self._reset()
-        logger.info("[96c] CLOSED: %s — re-armed", ticker)
+        logger.info("[97c] CLOSED: %s — re-armed", ticker)
 
     def get_position_snapshot(self, ticker: str) -> Optional[dict]:
         with self._lock:
@@ -109,7 +109,7 @@ class Simple96Engine:
                     # Different ticker — old market must have rotated away.
                     # Release the lock so the new market can trade.
                     logger.info(
-                        "[96c] Auto-release: active ticker=%s but got tick for %s — clearing",
+                        "[97c] Auto-release: active ticker=%s but got tick for %s — clearing",
                         self._position_ticker, ticker,
                     )
                     self._reset()
@@ -130,7 +130,7 @@ class Simple96Engine:
                     if should_stop:
                         side = self._position_side
                         logger.warning(
-                            "[96c] STOP LOSS: %s  %s_bid=%.4f  entry=%.4f  side=%s",
+                            "[97c] STOP LOSS: %s  %s_bid=%.4f  entry=%.4f  side=%s",
                             ticker,
                             "no" if side == "NO" else "yes",
                             check_price, self._entry_price or 0, side,
@@ -181,7 +181,7 @@ class Simple96Engine:
             # Catches any future threshold-config mistakes
             if not (BUY_MIN <= entry_px <= BUY_MAX):
                 logger.error(
-                    "[96c] REJECTED bad entry_px=%.4f  side=%s  yes_ask=%s  no_ask=%s  "
+                    "[97c] REJECTED bad entry_px=%.4f  side=%s  yes_ask=%s  no_ask=%s  "
                     "(bounds %.2f-%.2f)",
                     entry_px, side, best_ask, no_ask, BUY_MIN, BUY_MAX,
                 )
@@ -190,7 +190,7 @@ class Simple96Engine:
             self._position_side = side
 
         logger.info(
-            "[96c] SIGNAL: %s  side=%s  entry=%.4f  (yes_ask=%s no_ask=%s)",
+            "[97c] SIGNAL: %s  side=%s  entry=%.4f  (yes_ask=%s no_ask=%s)",
             ticker, side, entry_px, best_ask, no_ask,
         )
 
