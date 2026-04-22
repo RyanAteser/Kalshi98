@@ -56,6 +56,10 @@ class MarketWorker(threading.Thread):
     # Track last update globally per ticker so workers know if WS is alive
     _last_ws_update: ClassVar[dict[str, float]] = {}
 
+    # Maps ticker → active worker so the shared WS callback can dispatch
+    # to whichever worker currently owns that market after rotations.
+    _ticker_to_worker: ClassVar[dict[str, 'MarketWorker']] = {}
+
     def __init__(
             self,
             client: KalshiClient,
@@ -80,16 +84,20 @@ class MarketWorker(threading.Thread):
         self._stop_event.set()
 
     def run(self) -> None:
+        MarketWorker._ticker_to_worker[self._ticker] = self
         delay = self._config.worker_restart_delay
-        while not self._stop_event.is_set():
-            try:
-                logger.info("[%s] Worker starting", self._ticker)
-                self._run_stream()
-            except Exception as exc:
-                if self._stop_event.is_set():
-                    break
-                logger.error("[%s] Worker crashed: %s", self._ticker, exc)
-                time.sleep(delay)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    logger.info("[%s] Worker starting", self._ticker)
+                    self._run_stream()
+                except Exception as exc:
+                    if self._stop_event.is_set():
+                        break
+                    logger.error("[%s] Worker crashed: %s", self._ticker, exc)
+                    time.sleep(delay)
+        finally:
+            MarketWorker._ticker_to_worker.pop(self._ticker, None)
 
     def _run_stream(self) -> None:
         self._push_initial_snapshot()
@@ -159,9 +167,13 @@ class MarketWorker(threading.Thread):
                             target=target_px,
                         ))
 
-                        # If this specific worker is the one for this ticker
-                        if ticker == self._ticker and raw_price is not None:
-                            self._on_tick(raw_price, raw_bid, raw_ask, volume)
+                        # Dispatch to whichever worker currently owns this ticker.
+                        # Using a class-level dict instead of closing over self._ticker
+                        # so that market rotations work correctly — after a rotation,
+                        # the new worker is the registered owner and receives ticks.
+                        target = MarketWorker._ticker_to_worker.get(ticker)
+                        if target is not None and raw_price is not None:
+                            target._on_tick(raw_price, raw_bid, raw_ask, volume)
 
                     feed.on("ticker")(handle_msg)
                     feed.start()

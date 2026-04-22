@@ -321,7 +321,26 @@ class RiskManager:
         )
 
         if not result.success:
-            logger.error("[%s] Sell failed: %s", signal.ticker, result.error)
+            err_str = str(result.error or "").lower()
+            if "market_closed" in err_str or "market closed" in err_str:
+                # Market settled before we could sell — treat as a settlement win.
+                # The poller would eventually do this, but doing it now re-arms the
+                # engine immediately so we can trade the next market without delay.
+                logger.warning(
+                    "[%s] Sell blocked: market already closed — recording as settlement",
+                    signal.ticker,
+                )
+                self._db.close_position(pos_id)
+                self._signal_engine.mark_position_closed(signal.ticker)
+                self._local_open_tickers.discard(signal.ticker)
+                pnl = (1.0 - entry_price) * quantity
+                self._sizer.record_result(pnl)
+                event_bus.push_trade(TradeEvent(
+                    ticker=signal.ticker, side="SELL",
+                    price=1.0, qty=quantity, pnl=pnl,
+                ))
+            else:
+                logger.error("[%s] Sell failed: %s", signal.ticker, result.error)
             return
 
         exit_price = result.filled_price or sell_price

@@ -297,11 +297,12 @@ class PortfolioPoller(threading.Thread):
             )
             try:
                 avg_val = float(avg_raw) if avg_raw is not None else 0.0
-                # market_exposure_dollars = total $ exposure, divide by qty to get avg price
+                # market_exposure_dollars is always total $ exposure — always divide by qty.
+                # The old heuristic (divide only if avg_val > qty) was wrong when total
+                # exposure < qty numerically (e.g. $9.80 for 10 contracts → 0.98/contract).
                 if avg_val > 0 and abs(qty_f) > 0:
-                    # If value > qty, it's total dollars; otherwise treat as per-contract price
-                    per_contract = avg_val / abs(qty_f) if avg_val > abs(qty_f) else avg_val
-                    # Normalize: cents -> dollars if > 1
+                    per_contract = avg_val / abs(qty_f)
+                    # Normalize: cents → dollars if > 1 (some API versions return cents)
                     avg_price = per_contract / 100.0 if per_contract > 1.0 else per_contract
                 else:
                     avg_price = 0.0
