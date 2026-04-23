@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+*.db
+*.log
+
+.env
+keys/
+*.pem
+
+.idea/
+*.iml
+*.DS_Store

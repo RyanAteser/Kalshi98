@@ -224,5 +224,6 @@ class MarketWorker(threading.Thread):
             sig = self._signal_engine.process_tick(self._ticker, self._market_id, price, bid, ask)
             if sig:
                 self._risk_manager.handle_signal(sig, bid, ask)
+            self._risk_manager.shadow_tick(self._ticker, bid, ask)
         except Exception as exc:
             logger.error("[%s] Tick processing error: %s", self._ticker, exc)
