@@ -54,6 +54,7 @@ class PortfolioPoller(threading.Thread):
         # Tracks when each position was opened (for grace period)
         self._position_opened_at: dict[str, float] = {}
         self._logged_raw_format   = False   # log raw response once for debugging
+        self._shadow = None
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -62,6 +63,9 @@ class PortfolioPoller(threading.Thread):
         """Call from risk_manager after a successful buy to arm grace period."""
         self._position_opened_at[ticker] = time.time()
         logger.debug("[%s] Grace period armed for %.0fs", ticker, RECONCILE_GRACE_SEC)
+
+    def set_shadow_tracker(self, shadow) -> None:
+        self._shadow = shadow
 
     def run(self) -> None:
         logger.info(
@@ -183,6 +187,8 @@ class PortfolioPoller(threading.Thread):
             pnl = (1.0 - entry_price) * qty
             if self._sizer:
                 self._sizer.record_result(pnl)
+            if self._shadow is not None:
+                self._shadow.close_all(ticker, 1.0, "settlement")
 
             logger.info(
                 "[%s] Closed: entry=%.4f qty=%d pnl=+%.4f (assumed settlement)",

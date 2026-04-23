@@ -25,6 +25,7 @@ from core.config import load_config
 from core.execution_engine import ExecutionEngine
 from core.market_fetcher import fetch_active_sports_markets
 from core.risk_manager import RiskManager
+from core.shadow_tracker import ShadowTracker
 from core.signal_engine import SignalEngine
 from core.worker import MarketWorker
 from db.db import Database
@@ -66,7 +67,8 @@ def main() -> None:
     # ── Core components ──────────────────────────────────────────────
     signal_engine = SignalEngine(config)
     execution_engine = ExecutionEngine(client, config)
-    risk_manager = RiskManager(db, signal_engine, execution_engine, config)
+    risk_manager = RiskManager(db, signal_engine, execution_engine, config, client)
+    risk_manager.set_shadow_tracker(ShadowTracker(db))
 
     # ── Fetch markets ────────────────────────────────────────────────
     markets = []

@@ -25,6 +25,7 @@ from core.execution_engine import ExecutionEngine
 from core.models import Signal, SignalType
 from core.position_sizer import PositionSizer
 from core.signal_engine_router import SignalEngineRouter
+from core.shadow_tracker import ShadowTracker
 from core import event_bus
 from core.event_bus import TradeEvent, SignalEvent
 
@@ -56,12 +57,21 @@ class RiskManager:
         self._order_cooldown: dict[str, float] = {}
         # Poller reference — set later via set_poller() to avoid circular init
         self._poller = None
+        # Shadow tracker — set later via set_shadow_tracker()
+        self._shadow: Optional[ShadowTracker] = None
         # Local position guard: tickers we just bought, before Kalshi API catches up
         self._local_open_tickers: set[str] = set()
 
     def set_poller(self, poller) -> None:
         """Inject portfolio_poller reference so buys can arm its grace period."""
         self._poller = poller
+
+    def set_shadow_tracker(self, shadow: ShadowTracker) -> None:
+        self._shadow = shadow
+
+    def shadow_tick(self, ticker: str, bid: Optional[float], ask: Optional[float]) -> None:
+        if self._shadow is not None:
+            self._shadow.process_tick(ticker, bid, ask)
 
     def _get_lock(self, ticker: str) -> threading.Lock:
         with self._global_lock:
@@ -266,6 +276,9 @@ class RiskManager:
         # Mark locally so we don't double-buy during Kalshi API lag
         self._local_open_tickers.add(signal.ticker)
 
+        if self._shadow is not None:
+            self._shadow.open(signal.ticker, kalshi_side, filled_price)
+
         event_bus.push_trade(TradeEvent(
             ticker=signal.ticker, side="BUY",
             price=filled_price, qty=result.filled_qty,
@@ -335,6 +348,8 @@ class RiskManager:
                 self._local_open_tickers.discard(signal.ticker)
                 pnl = (1.0 - entry_price) * quantity
                 self._sizer.record_result(pnl)
+                if self._shadow is not None:
+                    self._shadow.close_all(signal.ticker, 1.0, "settlement")
                 event_bus.push_trade(TradeEvent(
                     ticker=signal.ticker, side="SELL",
                     price=1.0, qty=quantity, pnl=pnl,
@@ -359,6 +374,8 @@ class RiskManager:
         self._signal_engine.mark_position_closed(signal.ticker)
         self._local_open_tickers.discard(signal.ticker)   # clear local guard
         self._sizer.record_result(pnl)
+        if self._shadow is not None:
+            self._shadow.close_all(signal.ticker, exit_price, "real_exit")
 
         event_bus.push_trade(TradeEvent(
             ticker=signal.ticker, side="SELL",

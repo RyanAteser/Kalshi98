@@ -24,6 +24,7 @@ from core.market_fetcher import fetch_active_sports_markets
 from core.market_rotator import MarketRotator
 from core.portfolio_poller import PortfolioPoller
 from core.risk_manager import RiskManager
+from core.shadow_tracker import ShadowTracker
 from core.signal_engine_router import SignalEngineRouter
 from core.worker import MarketWorker
 from db.db import Database
@@ -252,6 +253,10 @@ def main() -> None:
 
     event_bus.subscribe_trade(_on_trade)
 
+    # ── Shadow tracker ─────────────────────────────────────────────────
+    shadow = ShadowTracker(db)
+    risk_manager.set_shadow_tracker(shadow)
+
     # ── Portfolio poller ──────────────────────────────────────────────
     portfolio_poller = PortfolioPoller(
         client=client,
@@ -259,6 +264,7 @@ def main() -> None:
         db=db,
         sizer=risk_manager._sizer,
     )
+    portfolio_poller.set_shadow_tracker(shadow)
     risk_manager.set_poller(portfolio_poller)   # ← wire grace period + double-buy guard
     portfolio_poller.start()
 
