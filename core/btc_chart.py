@@ -74,7 +74,10 @@ class BtcChart(tk.Frame):
     def update_candles(self, candles: List[Candle]) -> None:
         """Called from BtcFeed callback (may be off main thread — use after())."""
         self._candles = candles
-        self._redraw()
+        try:
+            self._redraw()
+        except Exception as exc:
+            logger.warning("Chart update_candles redraw error: %s", exc, exc_info=True)
 
     def update_orderbook(
             self,

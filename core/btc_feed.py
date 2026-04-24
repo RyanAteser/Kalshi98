@@ -122,9 +122,10 @@ class BtcFeed(threading.Thread):
     def _fetch(self) -> List[Candle]:
         """
         Fetch candles from Coinbase Exchange public API.
-        Returns list of Candle objects, newest first.
+        Returns list of Candle objects, newest-first.
+        Handles both old list-of-lists format and new dict-with-candles format.
         """
-        url = f"{COINBASE_URL}?granularity={GRANULARITY}&limit={CANDLE_LIMIT}"
+        url = f"{COINBASE_URL}?granularity={GRANULARITY}"
         req = urllib.request.Request(
             url,
             headers={
@@ -136,23 +137,54 @@ class BtcFeed(threading.Thread):
         with urllib.request.urlopen(req, timeout=10) as resp:
             raw = json.loads(resp.read().decode())
 
-        # raw = [[ts, low, high, open, close, volume], ...]  newest first
-        candles = []
-        for row in raw:
-            if len(row) < 6:
-                continue
-            candles.append(Candle(
-                ts=int(row[0]),
-                low=float(row[1]),
-                high=float(row[2]),
-                open=float(row[3]),
-                close=float(row[4]),
-                volume=float(row[5]),
-            ))
+        candles = self._parse_candles(raw)
 
-        logger.debug(
-            "BTC feed: %d candles, latest close=%.2f",
-            len(candles),
-            candles[0].close if candles else 0,
-        )
+        if not candles:
+            logger.warning(
+                "BTC feed: 0 candles parsed — raw type=%s snippet=%.200s",
+                type(raw).__name__, str(raw),
+            )
+        else:
+            logger.info(
+                "BTC feed: %d candles, latest close=%.2f",
+                len(candles), candles[0].close,
+            )
+        return candles
+
+    @staticmethod
+    def _parse_candles(raw) -> List[Candle]:
+        """Parse Coinbase response into Candle list (newest-first)."""
+        if isinstance(raw, list):
+            rows = raw
+        elif isinstance(raw, dict) and "candles" in raw:
+            rows = raw["candles"]
+        else:
+            return []
+
+        candles: List[Candle] = []
+        for row in rows:
+            try:
+                if isinstance(row, dict):
+                    candles.append(Candle(
+                        ts=int(row["start"]),
+                        low=float(row["low"]),
+                        high=float(row["high"]),
+                        open=float(row["open"]),
+                        close=float(row["close"]),
+                        volume=float(row["volume"]),
+                    ))
+                elif hasattr(row, "__len__") and len(row) >= 6:
+                    candles.append(Candle(
+                        ts=int(row[0]),
+                        low=float(row[1]),
+                        high=float(row[2]),
+                        open=float(row[3]),
+                        close=float(row[4]),
+                        volume=float(row[5]),
+                    ))
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+
+        # Normalise to newest-first regardless of source format
+        candles.sort(key=lambda c: c.ts, reverse=True)
         return candles

@@ -297,6 +297,8 @@ def main() -> None:
     btc_feed = BtcFeed()
 
     def _on_candles(candles):
+        logger.info("BTC candles callback: %d candles, latest=%.2f",
+                    len(candles), candles[0].close if candles else 0)
         root.after(0, lambda: chart.update_candles(candles))
         root.after(0, lambda: chart.update_sizer_stats(risk_manager._sizer.stats))
 
