@@ -13,10 +13,13 @@ Features:
 
 from __future__ import annotations
 
+import logging
 import tkinter as tk
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 from core.btc_feed import Candle
 
@@ -242,7 +245,10 @@ class BtcChart(tk.Frame):
     # ── Periodic refresh ──────────────────────────────────────────────
 
     def _schedule_refresh(self) -> None:
-        self._redraw()
+        try:
+            self._redraw()
+        except Exception as exc:
+            logger.warning("Chart redraw error: %s", exc)
         self.after(2000, self._schedule_refresh)
 
     # ── Scrolling ─────────────────────────────────────────────────────
@@ -327,7 +333,7 @@ class BtcChart(tk.Frame):
                 )
 
         # ── Candles ───────────────────────────────────────────────────
-        for i, candle in enumerate(reversed(visible)):
+        for i, candle in enumerate(visible):  # visible[0]=newest → drawn at right
             cx   = x0 + chart_w - (i + 1) * step + CANDLE_W // 2
             bull = candle.is_bullish
             col  = GREEN if bull else RED
@@ -388,8 +394,7 @@ class BtcChart(tk.Frame):
 
         # ── Trade markers ─────────────────────────────────────────────
         for marker in self._markers:
-            # Find which visible candle this trade belongs to
-            for i, candle in enumerate(reversed(visible)):
+            for i, candle in enumerate(visible):
                 if candle.ts == marker.candle_ts:
                     cx = x0 + chart_w - (i + 1) * step + CANDLE_W // 2
                     my = px(marker.price)
