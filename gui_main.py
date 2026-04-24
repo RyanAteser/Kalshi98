@@ -25,6 +25,7 @@ from core.market_rotator import MarketRotator
 from core.portfolio_poller import PortfolioPoller
 from core.risk_manager import RiskManager
 from core.shadow_tracker import ShadowTracker
+from core.shadow_vol_tracker import ShadowVolTracker
 from core.signal_engine_router import SignalEngineRouter
 from core.worker import MarketWorker
 from db.db import Database
@@ -253,9 +254,11 @@ def main() -> None:
 
     event_bus.subscribe_trade(_on_trade)
 
-    # ── Shadow tracker ─────────────────────────────────────────────────
+    # ── Shadow trackers ────────────────────────────────────────────────
     shadow = ShadowTracker(db)
     risk_manager.set_shadow_tracker(shadow)
+    shadow_vol = ShadowVolTracker(db)
+    risk_manager.set_shadow_vol_tracker(shadow_vol)
 
     # ── Portfolio poller ──────────────────────────────────────────────
     portfolio_poller = PortfolioPoller(

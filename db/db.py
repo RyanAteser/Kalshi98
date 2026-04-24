@@ -176,6 +176,21 @@ class Database:
                 created_at       TEXT NOT NULL
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS shadow_vol_trades (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker           TEXT NOT NULL,
+                side             TEXT NOT NULL,
+                multiplier       REAL NOT NULL,
+                entry_price      REAL NOT NULL,
+                entry_ts         TEXT NOT NULL,
+                exit_price       REAL,
+                exit_ts          TEXT,
+                exit_reason      TEXT,
+                pnl_per_contract REAL,
+                created_at       TEXT NOT NULL
+            )
+            """,
         ]
         # PostgreSQL uses SERIAL instead of AUTOINCREMENT
         if self._postgres:
@@ -324,6 +339,42 @@ class Database:
     def get_open_shadow_positions(self, ticker: str) -> list:
         return self.fetchall(
             "SELECT id, threshold, entry_price, side FROM shadow_trades"
+            " WHERE ticker=? AND exit_price IS NULL",
+            (ticker,),
+        )
+
+    # ------------------------------------------------------------------
+    # Shadow vol trades
+    # ------------------------------------------------------------------
+
+    def open_shadow_vol_position(
+        self, ticker: str, side: str, entry_price: float, multiplier: float
+    ) -> int:
+        now = datetime.utcnow().isoformat()
+        sql = """
+        INSERT INTO shadow_vol_trades (ticker, side, multiplier, entry_price, entry_ts, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """
+        with self._cursor() as cur:
+            cur.execute(sql, (ticker, side, multiplier, entry_price, now, now))
+            if self._postgres:
+                cur.execute("SELECT lastval()")
+                return cur.fetchone()[0]
+            return cur.lastrowid
+
+    def close_shadow_vol_position(
+        self, row_id: int, exit_price: float, reason: str, pnl: float
+    ) -> None:
+        self.execute(
+            """UPDATE shadow_vol_trades
+               SET exit_price=?, exit_ts=?, exit_reason=?, pnl_per_contract=?
+               WHERE id=?""",
+            (exit_price, datetime.utcnow().isoformat(), reason, pnl, row_id),
+        )
+
+    def get_open_shadow_vol_positions(self, ticker: str) -> list:
+        return self.fetchall(
+            "SELECT id, multiplier, entry_price, side FROM shadow_vol_trades"
             " WHERE ticker=? AND exit_price IS NULL",
             (ticker,),
         )

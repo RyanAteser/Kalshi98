@@ -26,6 +26,7 @@ from core.models import Signal, SignalType
 from core.position_sizer import PositionSizer
 from core.signal_engine_router import SignalEngineRouter
 from core.shadow_tracker import ShadowTracker
+from core.shadow_vol_tracker import ShadowVolTracker
 from core import event_bus
 from core.event_bus import TradeEvent, SignalEvent
 
@@ -59,6 +60,8 @@ class RiskManager:
         self._poller = None
         # Shadow tracker — set later via set_shadow_tracker()
         self._shadow: Optional[ShadowTracker] = None
+        # Volume spike shadow tracker — set later via set_shadow_vol_tracker()
+        self._shadow_vol: Optional[ShadowVolTracker] = None
         # Local position guard: tickers we just bought, before Kalshi API catches up
         self._local_open_tickers: set[str] = set()
 
@@ -69,9 +72,18 @@ class RiskManager:
     def set_shadow_tracker(self, shadow: ShadowTracker) -> None:
         self._shadow = shadow
 
+    def set_shadow_vol_tracker(self, shadow_vol: ShadowVolTracker) -> None:
+        self._shadow_vol = shadow_vol
+
     def shadow_tick(self, ticker: str, bid: Optional[float], ask: Optional[float]) -> None:
         if self._shadow is not None:
             self._shadow.process_tick(ticker, bid, ask)
+
+    def shadow_vol_tick(
+        self, ticker: str, bid: Optional[float], ask: Optional[float], vol: Optional[float]
+    ) -> None:
+        if self._shadow_vol is not None:
+            self._shadow_vol.process_tick(ticker, bid, ask, vol)
 
     def _get_lock(self, ticker: str) -> threading.Lock:
         with self._global_lock:
@@ -214,7 +226,7 @@ class RiskManager:
                     market_id=signal.market_id,
                     entry_price=best_ask,
                     quantity=qty,
-                    stop_loss=0.90,
+                    stop_loss=round((best_ask or filled_price) - 0.02, 6),
                 )
                 self._signal_engine.mark_position_open(
                     ticker=signal.ticker,
@@ -251,11 +263,12 @@ class RiskManager:
             quantity=result.filled_qty,
         )
 
+        computed_stop = self._signal_engine.get_stop_price() or round(filled_price - 0.02, 6)
         position_id = self._db.open_position(
             market_id=signal.market_id,
             entry_price=filled_price,
             quantity=result.filled_qty,
-            stop_loss=0.82,
+            stop_loss=computed_stop,
         )
 
         # Update engine with real position_id now that we have it
@@ -278,6 +291,8 @@ class RiskManager:
 
         if self._shadow is not None:
             self._shadow.open(signal.ticker, kalshi_side, filled_price)
+        if self._shadow_vol is not None:
+            self._shadow_vol.open(signal.ticker, kalshi_side, filled_price)
 
         event_bus.push_trade(TradeEvent(
             ticker=signal.ticker, side="BUY",
@@ -350,6 +365,8 @@ class RiskManager:
                 self._sizer.record_result(pnl)
                 if self._shadow is not None:
                     self._shadow.close_all(signal.ticker, 1.0, "settlement")
+                if self._shadow_vol is not None:
+                    self._shadow_vol.close_all(signal.ticker, 1.0, "settlement")
                 event_bus.push_trade(TradeEvent(
                     ticker=signal.ticker, side="SELL",
                     price=1.0, qty=quantity, pnl=pnl,
@@ -376,6 +393,8 @@ class RiskManager:
         self._sizer.record_result(pnl)
         if self._shadow is not None:
             self._shadow.close_all(signal.ticker, exit_price, "real_exit")
+        if self._shadow_vol is not None:
+            self._shadow_vol.close_all(signal.ticker, exit_price, "real_exit")
 
         event_bus.push_trade(TradeEvent(
             ticker=signal.ticker, side="SELL",
