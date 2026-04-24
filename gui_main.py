@@ -7,11 +7,13 @@ Shuts down after 2 consecutive losses.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import time
 import threading
 import tkinter as tk
+import urllib.request
 import tkinter.ttk as ttk
 
 from dotenv import load_dotenv
@@ -303,6 +305,31 @@ def main() -> None:
     btc_feed.on_update(_on_candles)
     btc_feed.start()
     signal_engine.set_t2t_engine(btc_feed)
+
+    def _poll_balance():
+        try:
+            bal = risk_manager._get_cash_balance()
+            if bal is not None:
+                balance_lbl.config(text=f"Balance: ${bal:.2f}")
+        except Exception:
+            pass
+        root.after(10_000, _poll_balance)
+
+    def _poll_btc_price():
+        try:
+            url = "https://api.exchange.coinbase.com/products/BTC-USD/ticker"
+            req = urllib.request.Request(url, headers={"User-Agent": "btc-trader/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+            price = float(data.get("price", 0))
+            if price > 0:
+                root.after(0, lambda: chart.update_live_price(price))
+        except Exception:
+            pass
+        root.after(5_000, _poll_btc_price)
+
+    root.after(3_000, _poll_balance)
+    root.after(2_000, _poll_btc_price)
 
     # ── Market loader ─────────────────────────────────────────────────
     def load_markets():
