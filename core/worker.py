@@ -29,17 +29,6 @@ def _safe_float(val) -> Optional[float]:
     except (TypeError, ValueError):
         return None
 
-def parse_btc_target(ticker: str) -> Optional[float]:
-    """Extracts the BTC strike price from ticker (e.g. KXBTC15M-26APR171015-45 → 45000.0)."""
-    try:
-        parts = ticker.split('-')
-        if len(parts) >= 3:
-            raw_target = parts[-1]  # last segment is the strike in thousands
-            return float(raw_target) * 1000.0
-    except Exception:
-        pass
-    return None
-
 
 def resolve_price_from_dict(snapshot: dict) -> Optional[float]:
     for key in ("last_price", "best_ask", "best_bid"):
@@ -79,6 +68,8 @@ class MarketWorker(threading.Thread):
         self._risk_manager = risk_manager
         self._config = config
         self._stop_event = threading.Event()
+        self._btc_target: Optional[float] = None
+        self._close_ts:   Optional[Any]   = None
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -155,7 +146,11 @@ class MarketWorker(threading.Thread):
                                 raw_price = v
                                 break
 
-                        target_px = parse_btc_target(ticker)
+                        # Use cached btc_target from last snapshot (set by _handle_snapshot)
+                        ws_target = None
+                        ws_worker = MarketWorker._ticker_to_worker.get(ticker)
+                        if ws_worker is not None:
+                            ws_target = ws_worker._btc_target
 
                         event_bus.push_market(MarketUpdate(
                             ticker=ticker,
@@ -164,7 +159,7 @@ class MarketWorker(threading.Thread):
                             bid=raw_bid,
                             ask=raw_ask,
                             volume=volume,
-                            target=target_px,
+                            target=ws_target,
                         ))
 
                         # Dispatch to whichever worker currently owns this ticker.
@@ -204,7 +199,9 @@ class MarketWorker(threading.Thread):
             logger.debug("[%s] Poll failed: %s", self._ticker, e)
 
     def _handle_snapshot(self, snap: dict) -> None:
-        target_px = parse_btc_target(self._ticker)
+        self._btc_target = snap.get("btc_target") or self._btc_target
+        self._close_ts   = snap.get("close_ts")   or self._close_ts
+        self._signal_engine.update_t2t_context(self._ticker, self._btc_target, self._close_ts)
         event_bus.push_market(MarketUpdate(
             ticker=self._ticker,
             market_id=self._market_id,
@@ -212,7 +209,7 @@ class MarketWorker(threading.Thread):
             bid=snap.get("best_bid"),
             ask=snap.get("best_ask"),
             volume=snap.get("volume"),
-            target=target_px,
+            target=self._btc_target,
         ))
         sig_price = resolve_price_from_dict(snap)
         if sig_price is not None:
