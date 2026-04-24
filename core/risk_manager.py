@@ -226,7 +226,7 @@ class RiskManager:
                     market_id=signal.market_id,
                     entry_price=best_ask,
                     quantity=qty,
-                    stop_loss=0.90,
+                    stop_loss=round((best_ask or filled_price) - 0.02, 6),
                 )
                 self._signal_engine.mark_position_open(
                     ticker=signal.ticker,
@@ -263,11 +263,12 @@ class RiskManager:
             quantity=result.filled_qty,
         )
 
+        computed_stop = self._signal_engine.get_stop_price() or round(filled_price - 0.02, 6)
         position_id = self._db.open_position(
             market_id=signal.market_id,
             entry_price=filled_price,
             quantity=result.filled_qty,
-            stop_loss=0.82,
+            stop_loss=computed_stop,
         )
 
         # Update engine with real position_id now that we have it

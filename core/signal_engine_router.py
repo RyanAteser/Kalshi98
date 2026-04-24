@@ -86,3 +86,6 @@ class SignalEngineRouter:
         with self._lock:
             engine = self._active
         return engine.get_position_snapshot(ticker)
+
+    def get_stop_price(self) -> Optional[float]:
+        return self._simple96.get_stop_price()

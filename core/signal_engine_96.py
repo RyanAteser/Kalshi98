@@ -1,8 +1,11 @@
 """
-signal_engine_96.py — Buy YES or NO contracts at 97–99c. Stop out at 90c.
+signal_engine_96.py — Buy YES or NO contracts at 97c. Stop out at entry - FIXED_RISK.
 
 Hardened version:
   - Strict threshold validation with explicit bounds
+  - Max entry price capped at BUY_MAX (0.97) — avoids terrible risk/reward at 0.98-0.99
+  - Proportional stop loss: stop = entry_price - FIXED_RISK (default 2 cents)
+    At entry 0.97 → stop 0.95 (risk 2c to gain 3c). Never a flat 9-cent risk.
   - External cooldown support — risk_manager can call mark_cooldown(ticker, until_ts)
     to prevent signal spam while in cooldown
   - Debug logging of every tick with exact thresholds used
@@ -21,9 +24,9 @@ from core.models import Signal, SignalType
 logger = logging.getLogger(__name__)
 
 # ── Thresholds ────────────────────────────────────────────────────────
-BUY_MIN   = 0.97      # lower bound: price must be >= this to trigger entry
-BUY_MAX   = 0.99      # upper bound: price must be <= this to trigger entry
-STOP_LOSS = 0.90      # exit if price drops to this or below
+BUY_MIN    = 0.97    # lower bound: price must be >= this to trigger entry
+BUY_MAX    = 0.97    # upper bound: cap at 0.97 — buying at 0.98-0.99 risks 2-9c to gain 1-2c
+FIXED_RISK = 0.02    # max cents to risk per contract; stop = entry_price - FIXED_RISK
 
 
 class Simple96Engine:
@@ -39,6 +42,7 @@ class Simple96Engine:
         self._position_ticker: Optional[str]   = None
         self._position_side:   Optional[str]   = None
         self._entry_price:     Optional[float] = None
+        self._stop_price:      Optional[float] = None
         self._position_id:     Optional[int]   = None
 
     # ── Cooldown (called by risk_manager on failed orders) ────────────
@@ -64,13 +68,18 @@ class Simple96Engine:
             self._pending_entry   = False
             self._position_ticker = ticker
             self._entry_price     = entry_price
+            self._stop_price      = round(entry_price - FIXED_RISK, 6)
             self._position_id     = position_id
             if side is not None:
                 self._position_side = side
         logger.info(
-            "[97c] IN: %s @ %.4f  side=%s  id=%d",
-            ticker, entry_price, self._position_side, position_id,
+            "[97c] IN: %s @ %.4f  stop=%.4f  side=%s  id=%d",
+            ticker, entry_price, self._stop_price, self._position_side, position_id,
         )
+
+    def get_stop_price(self) -> Optional[float]:
+        with self._lock:
+            return self._stop_price
 
     def mark_position_closed(self, ticker: str) -> None:
         with self._lock:
@@ -118,16 +127,17 @@ class Simple96Engine:
                     # Fall through to signal check below
                 else:
                     # Side-aware stop loss using LIVE book prices (not stale last trade)
+                    stop = self._stop_price
                     if self._position_side == "NO":
                         # NO bid = 1 - YES ask. That's what we could sell our NO for.
                         no_bid = round(1.0 - best_ask, 6) if best_ask is not None else None
                         check_price = no_bid
-                        should_stop = no_bid is not None and no_bid <= STOP_LOSS
+                        should_stop = stop is not None and no_bid is not None and no_bid <= stop
                     else:
                         # For YES: check YES bid (what we could actually sell at)
                         # Never use last_price — it can be stale by minutes.
                         check_price = best_bid
-                        should_stop = best_bid is not None and best_bid <= STOP_LOSS
+                        should_stop = stop is not None and best_bid is not None and best_bid <= stop
 
                     if should_stop:
                         side = self._position_side
