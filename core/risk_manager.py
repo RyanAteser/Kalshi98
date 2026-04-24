@@ -227,7 +227,7 @@ class RiskManager:
                     market_id=signal.market_id,
                     entry_price=best_ask,
                     quantity=qty,
-                    stop_loss=round((best_ask or filled_price) - 0.02, 6),
+                    stop_loss=round((best_ask or signal.price) - 0.02, 6),
                 )
                 self._signal_engine.mark_position_open(
                     ticker=signal.ticker,
