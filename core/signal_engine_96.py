@@ -10,6 +10,15 @@ Hardened version:
     to prevent signal spam while in cooldown
   - Debug logging of every tick with exact thresholds used
   - Re-entry allowed after stop loss or close
+
+FIX (stop loss never firing):
+  Ticks from OTHER tickers no longer reset the engine's position state.
+  Previously, whenever a tick arrived for a ticker other than the one we
+  held, _reset() would wipe the position and the next tick for our held
+  ticker would skip the stop loss check entirely (because _has_position
+  had been set to False). Now mismatched-ticker ticks are ignored and
+  market rotation/settlement is handled exclusively by
+  mark_position_closed() from portfolio_poller / risk_manager.
 """
 
 from __future__ import annotations
@@ -158,7 +167,52 @@ class Simple96Engine:
                                 "entry_price": self._entry_price,
                             },
                         )
+                    # Tick is for a different market — IGNORE it.
+                    #
+                    # We only hold one position at a time. Ticks for our held
+                    # ticker will arrive from its own worker and drive the
+                    # stop loss check below. Market rotation and settlement
+                    # are handled by mark_position_closed() from
+                    # portfolio_poller / risk_manager — NOT by resetting here.
+                    #
+                    # The previous implementation called self._reset() in this
+                    # branch, which nuked position state every time any other
+                    # ticker sent a tick, making stop loss effectively
+                    # impossible to trigger in a multi-worker setup.
                     return None
+
+                # Side-aware stop loss using LIVE book prices (not stale last trade)
+                if self._position_side == "NO":
+                    # NO bid = 1 - YES ask. That's what we could sell our NO for.
+                    no_bid = round(1.0 - best_ask, 6) if best_ask is not None else None
+                    check_price = no_bid
+                    should_stop = no_bid is not None and no_bid <= STOP_LOSS
+                else:
+                    # For YES: check YES bid (what we could actually sell at).
+                    # Never use last_price — it can be stale by minutes.
+                    check_price = best_bid
+                    should_stop = best_bid is not None and best_bid <= STOP_LOSS
+
+                if should_stop:
+                    side = self._position_side
+                    logger.warning(
+                        "[97c] STOP LOSS: %s  %s_bid=%.4f  entry=%.4f  side=%s",
+                        ticker,
+                        "no" if side == "NO" else "yes",
+                        check_price, self._entry_price or 0, side,
+                    )
+                    return Signal(
+                        ticker=ticker,
+                        market_id=market_id,
+                        signal_type=SignalType.STOP_LOSS,
+                        price=check_price,
+                        metadata={
+                            "engine":      "96c",
+                            "side":        side,
+                            "entry_price": self._entry_price,
+                        },
+                    )
+                return None
 
             # ── STANDING BY: suppress during cooldown or pending entry ───
             # _pending_entry stays True from signal generation until
