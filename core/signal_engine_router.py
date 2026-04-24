@@ -105,8 +105,9 @@ class SignalEngineRouter:
             self, ticker: str, position_id: int, entry_price: float,
             side: Optional[str] = None,
     ) -> None:
-        for e in (self._momentum, self._resolution, self._simple96):
+        for e in (self._momentum, self._resolution):
             e.mark_position_open(ticker, position_id, entry_price)
+        self._simple96.mark_position_open(ticker, position_id, entry_price, side=side)
         if self._t2t is not None:
             self._t2t.mark_position_open(ticker, position_id, entry_price, side=side)
 

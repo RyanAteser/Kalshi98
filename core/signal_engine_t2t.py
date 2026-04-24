@@ -129,6 +129,10 @@ class TimeToTargetEngine:
         close = self._close_ts.get(ticker)
         if close is None:
             return None
+        now_ts = time.time()
+        if isinstance(close, (int, float)):
+            return close - now_ts
+        # datetime path
         now = datetime.now(tz=timezone.utc)
         if close.tzinfo is None:
             close = close.replace(tzinfo=timezone.utc)
