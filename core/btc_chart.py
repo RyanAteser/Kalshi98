@@ -111,6 +111,19 @@ class BtcChart(tk.Frame):
         else:
             self._target_lbl.config(text="TARGET $——,———")
 
+    def update_live_price(self, price: float) -> None:
+        """Update header price label directly — call every 5s from gui ticker poll."""
+        prev_close = self._candles[1].close if len(self._candles) > 1 else price
+        chg = ((price - prev_close) / prev_close * 100) if prev_close else 0
+        self._price_lbl.config(
+            text=f"${price:,.2f}",
+            fg=GREEN if chg >= 0 else RED,
+        )
+        self._change_lbl.config(
+            text=f"{'▲' if chg >= 0 else '▼'} {abs(chg):.2f}%",
+            fg=GREEN if chg >= 0 else RED,
+        )
+
     def add_trade(self, side: str, price: float, qty: int,
                   pnl: Optional[float] = None) -> None:
         """Record a trade marker on the chart."""
