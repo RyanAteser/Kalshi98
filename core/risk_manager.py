@@ -186,6 +186,7 @@ class RiskManager:
             ticker=signal.ticker,
             position_id=-1,
             entry_price=side_ask,
+            side=kalshi_side,
         )
 
         # Persist signal
@@ -232,6 +233,7 @@ class RiskManager:
                     ticker=signal.ticker,
                     position_id=position_id,
                     entry_price=best_ask,
+                    side=kalshi_side,
                 )
                 return
 
@@ -276,6 +278,7 @@ class RiskManager:
             ticker=signal.ticker,
             position_id=position_id,
             entry_price=filled_price,
+            side=kalshi_side,
         )
 
         # CRITICAL: Tell poller a position was just opened so it waits out the

@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from typing import Optional
 
 from core.models import Signal, SignalType
@@ -37,6 +38,10 @@ BUY_MIN    = 0.97    # lower bound: price must be >= this to trigger entry
 BUY_MAX    = 0.97    # upper bound: cap at 0.97 — buying at 0.98-0.99 risks 2-9c to gain 1-2c
 FIXED_RISK = 0.02    # max cents to risk per contract; stop = entry_price - FIXED_RISK
 
+# ── Spike filter ──────────────────────────────────────────────────────
+SPIKE_WINDOW = 8     # look back this many ticks
+SPIKE_JUMP   = 0.05  # if price rose > 5c in SPIKE_WINDOW ticks, it's a spike — skip entry
+
 
 class Simple96Engine:
 
@@ -44,6 +49,8 @@ class Simple96Engine:
         self._lock = threading.Lock()
         self._reset()
         self._cooldown_until: dict[str, float] = {}
+        self._yes_ask_hist: deque = deque(maxlen=SPIKE_WINDOW)
+        self._no_ask_hist:  deque = deque(maxlen=SPIKE_WINDOW)
 
     def _reset(self) -> None:
         self._has_position     = False
@@ -221,6 +228,12 @@ class Simple96Engine:
             if self._pending_entry or self._in_cooldown(ticker):
                 return None
 
+            # ── Update spike history (always, not just on entry attempts) ─
+            if best_ask is not None:
+                self._yes_ask_hist.append(best_ask)
+            if best_bid is not None and best_bid > 0:
+                self._no_ask_hist.append(round(1.0 - best_bid, 6))
+
             # ── Check YES side (buy YES when BTC is going UP) ─────────
             yes_ask_valid = (
                     best_ask is not None
@@ -254,6 +267,17 @@ class Simple96Engine:
                     entry_px, side, best_ask, no_ask, BUY_MIN, BUY_MAX,
                 )
                 return None
+
+            # ── Spike filter: reject if price jumped too fast recently ─
+            hist = self._yes_ask_hist if side == "YES" else self._no_ask_hist
+            if len(hist) >= 3:
+                recent_min = min(hist)
+                if entry_px - recent_min > SPIKE_JUMP:
+                    logger.info(
+                        "[97c] Spike blocked: %s side=%s ask=%.4f min_recent=%.4f jump=%.4f",
+                        ticker, side, entry_px, recent_min, entry_px - recent_min,
+                    )
+                    return None
 
             self._position_side  = side
             self._pending_entry  = True   # block further signals until mark_position_open()

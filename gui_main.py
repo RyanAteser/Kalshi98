@@ -280,6 +280,7 @@ def main() -> None:
 
     btc_feed.on_update(_on_candles)
     btc_feed.start()
+    signal_engine.set_t2t_engine(btc_feed)
 
     # ── Market loader ─────────────────────────────────────────────────
     def load_markets():
