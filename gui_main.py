@@ -145,6 +145,28 @@ def main() -> None:
     if not config.paper_trade:
         mode_lbl.config(text="● LIVE", fg="#f44336")
 
+    def _poll_balance():
+        def _fetch():
+            try:
+                resp = client.portfolio.get_balance()
+                if isinstance(resp, dict):
+                    raw = (resp.get("balance") or resp.get("cash_balance")
+                           or resp.get("available_balance"))
+                else:
+                    raw = (getattr(resp, "balance", None)
+                           or getattr(resp, "cash_balance", None)
+                           or getattr(resp, "available_balance", None))
+                if raw is not None:
+                    dollars = float(raw) / 100.0
+                    root.after(0, lambda: balance_lbl.config(
+                        text=f"Balance: ${dollars:,.2f}"))
+            except Exception as exc:
+                logger.debug("Balance fetch error: %s", exc)
+        threading.Thread(target=_fetch, daemon=True).start()
+        root.after(30_000, _poll_balance)
+
+    root.after(2_000, _poll_balance)
+
     # ── Sidebar: Full Active Markets Table ───────────────────────────
     sidebar = tk.Frame(root, bg="#0a0c0f", width=340)
     sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(12, 0), pady=8)
