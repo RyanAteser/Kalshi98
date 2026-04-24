@@ -282,6 +282,17 @@ def main() -> None:
     btc_feed.start()
     signal_engine.set_t2t_engine(btc_feed)
 
+    def _poll_balance():
+        try:
+            bal = risk_manager._get_cash_balance()
+            if bal is not None:
+                balance_lbl.config(text=f"Balance: ${bal:.2f}")
+        except Exception:
+            pass
+        root.after(10_000, _poll_balance)
+
+    root.after(3_000, _poll_balance)
+
     # ── Market loader ─────────────────────────────────────────────────
     def load_markets():
         nonlocal markets

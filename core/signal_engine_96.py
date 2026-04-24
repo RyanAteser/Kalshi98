@@ -133,14 +133,10 @@ class Simple96Engine:
             # ── IN POSITION: stop loss check ──────────────────────────
             if self._has_position:
                 if self._position_ticker != ticker:
-                    # Different ticker — old market must have rotated away.
-                    # Release the lock so the new market can trade.
-                    logger.info(
-                        "[97c] Auto-release: active ticker=%s but got tick for %s — clearing",
-                        self._position_ticker, ticker,
-                    )
-                    self._reset()
-                    # Fall through to signal check below
+                    # Different ticker — not our market. Do nothing.
+                    # mark_position_closed() from portfolio_poller is the
+                    # only thing that should clear position state.
+                    return None
                 else:
                     # Side-aware stop loss using LIVE book prices (not stale last trade)
                     stop = self._stop_price

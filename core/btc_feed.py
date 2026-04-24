@@ -136,22 +136,27 @@ class BtcFeed(threading.Thread):
         with urllib.request.urlopen(req, timeout=10) as resp:
             raw = json.loads(resp.read().decode())
 
-        # raw = [[ts, low, high, open, close, volume], ...]  newest first
-        candles = []
-        for row in raw:
-            if len(row) < 6:
-                continue
-            candles.append(Candle(
-                ts=int(row[0]),
-                low=float(row[1]),
-                high=float(row[2]),
-                open=float(row[3]),
-                close=float(row[4]),
-                volume=float(row[5]),
-            ))
+        # Coinbase Exchange returns [[ts, low, high, open, close, volume], ...] newest-first.
+        # Guard against the API wrapping it in {"candles": [...]} in future.
+        rows = raw.get("candles", raw) if isinstance(raw, dict) else raw
 
-        logger.debug(
-            "BTC feed: %d candles, latest close=%.2f",
+        candles = []
+        for row in rows:
+            if isinstance(row, dict):
+                candles.append(Candle(
+                    ts=int(row.get("start", row.get("time", 0))),
+                    low=float(row["low"]), high=float(row["high"]),
+                    open=float(row["open"]), close=float(row["close"]),
+                    volume=float(row["volume"]),
+                ))
+            elif len(row) >= 6:
+                candles.append(Candle(
+                    ts=int(row[0]), low=float(row[1]), high=float(row[2]),
+                    open=float(row[3]), close=float(row[4]), volume=float(row[5]),
+                ))
+
+        logger.info(
+            "BTC feed: %d candles fetched, latest close=%.2f",
             len(candles),
             candles[0].close if candles else 0,
         )
