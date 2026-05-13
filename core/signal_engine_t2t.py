@@ -26,6 +26,7 @@ import logging
 import math
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING
 
@@ -47,6 +48,13 @@ BTC_GRANULARITY    = 900   # seconds per Coinbase 15m candle
 BTC_SIGMA_FALLBACK = 5.0   # $/s fallback when candle history is insufficient
 MIN_EV             = 0.005 # minimum expected value per contract to trigger entry
 
+# ── Recent-movement sigma floor ───────────────────────────────────────
+# Prevents a calm candle window from underestimating vol when BTC is
+# actively moving. We sample BTC price every tick, compute the observed
+# range over the last BTC_RECENT_WINDOW seconds, and use that as a floor.
+BTC_RECENT_WINDOW      = 120  # seconds of tick-level BTC price history to keep
+BTC_RANGE_SIGMA_FACTOR = 4.0  # range ≈ 4σ (conservative; errs toward higher σ → lower p_reach)
+
 
 class TimeToTargetEngine:
 
@@ -58,6 +66,8 @@ class TimeToTargetEngine:
         # Per-ticker context (set by update_context)
         self._btc_target: dict[str, Optional[float]] = {}
         self._close_ts:   dict[str, Optional[datetime]] = {}
+        # Tick-level BTC price history for sigma floor: deque of (timestamp, price)
+        self._btc_price_history: deque[tuple[float, float]] = deque()
 
     def _reset(self) -> None:
         self._has_position     = False
@@ -151,18 +161,20 @@ class TimeToTargetEngine:
         return (close - now).total_seconds()
 
     def _sigma_per_sec(self) -> float:
-        """Per-second BTC price volatility from recent 15m candles.
+        """Per-second BTC price volatility: max of candle-based and recent-movement floor.
 
-        Computes realized vol from close-to-close log returns scaled to per-second.
-        Falls back to BTC_SIGMA_FALLBACK when insufficient history.
+        Candle-based estimate uses close-to-close log returns scaled to per-second.
+        The recent-movement floor prevents a calm candle window from being exploited
+        when BTC is actually moving fast right now.
+        Falls back to BTC_SIGMA_FALLBACK when candle history is insufficient.
         """
         candles = self._btc_feed.latest_candles
         if len(candles) < 3:
-            return BTC_SIGMA_FALLBACK
+            return max(BTC_SIGMA_FALLBACK, self._sigma_floor_from_recent())
         sample = candles[:BTC_SIGMA_CANDLES]
         closes = [c.close for c in reversed(sample)]
         if len(closes) < 2:
-            return BTC_SIGMA_FALLBACK
+            return max(BTC_SIGMA_FALLBACK, self._sigma_floor_from_recent())
         returns = [math.log(closes[i + 1] / closes[i]) for i in range(len(closes) - 1)]
         n = len(returns)
         mean = sum(returns) / n
@@ -170,9 +182,32 @@ class TimeToTargetEngine:
         sigma_candle = math.sqrt(variance)
         current_price = self._btc_feed.current_price or 0.0
         if current_price <= 0:
-            return BTC_SIGMA_FALLBACK
+            return max(BTC_SIGMA_FALLBACK, self._sigma_floor_from_recent())
         sigma_per_sec = sigma_candle * current_price / math.sqrt(BTC_GRANULARITY)
-        return max(sigma_per_sec, 0.1)
+        return max(sigma_per_sec, 0.1, self._sigma_floor_from_recent())
+
+    def _sigma_floor_from_recent(self) -> float:
+        """Sigma floor derived from the range of BTC prices seen in the last BTC_RECENT_WINDOW seconds.
+
+        Uses range / BTC_RANGE_SIGMA_FACTOR as a per-window sigma estimate, then
+        scales to per-second. If BTC has barely moved, returns 0.0 (no constraint).
+        Called while holding self._lock.
+        """
+        now = time.time()
+        cutoff = now - BTC_RECENT_WINDOW
+        while self._btc_price_history and self._btc_price_history[0][0] < cutoff:
+            self._btc_price_history.popleft()
+        if len(self._btc_price_history) < 2:
+            return 0.0
+        prices = [p for _, p in self._btc_price_history]
+        price_range = max(prices) - min(prices)
+        if price_range <= 0:
+            return 0.0
+        oldest_ts = self._btc_price_history[0][0]
+        window_secs = now - oldest_ts
+        if window_secs <= 0:
+            return 0.0
+        return (price_range / BTC_RANGE_SIGMA_FACTOR) / math.sqrt(window_secs)
 
     def _p_reach(self, btc_current: float, btc_target: float, secs: float, sigma: float) -> float:
         """P(BTC reaches btc_target within secs seconds) via Gaussian diffusion.
@@ -251,6 +286,7 @@ class TimeToTargetEngine:
             btc_current = self._btc_feed.current_price
             if btc_current is None:
                 return None
+            self._btc_price_history.append((time.time(), btc_current))
 
             secs = self._secs_remaining(ticker)
             if secs is None or secs < MIN_SECS_TO_FILL or secs > MAX_ENTRY_SECS:
