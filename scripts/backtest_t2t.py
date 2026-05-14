@@ -358,16 +358,72 @@ def run_backtest(
 
 # ── Reporting ─────────────────────────────────────────────────────────
 
-def print_report(results: List[TradeResult], days: int) -> None:
+def _kalshi_fee(contracts: int, price: float) -> float:
+    """Estimate Kalshi round-trip fee for a winning trade."""
+    entry_fee = 0.07 * contracts * price * (1.0 - price) + 0.0035 * contracts * price
+    exit_fee  = 0.0035 * contracts * 1.0   # exit at $1 on win; trading fee = 0 at price=1
+    return entry_fee + exit_fee
+
+
+def _max_drawdown_pct(equity: List[float]) -> float:
+    peak = equity[0]
+    max_dd = 0.0
+    for v in equity:
+        if v > peak:
+            peak = v
+        if peak > 0:
+            max_dd = max(max_dd, (peak - v) / peak * 100)
+    return max_dd
+
+
+def _simulate_portfolio(
+        results: List[TradeResult],
+        account: float,
+        contracts_per_trade: int,
+) -> Tuple[float, List[float], float]:
+    """
+    Sequential portfolio simulation: one trade per 15-min window, highest EV.
+
+    Returns (final_account, equity_curve, total_fees).
+    """
+    from collections import defaultdict
+    by_window: dict[int, List[TradeResult]] = defaultdict(list)
+    for r in results:
+        by_window[r.window_ts].append(r)
+
+    equity    = [account]
+    total_fees = 0.0
+
+    for ts in sorted(by_window):
+        best = max(by_window[ts], key=lambda r: r.ev)
+
+        cost = contracts_per_trade * best.entry_px
+        if cost > account:
+            # Scale down to what we can afford
+            contracts = max(1, int(account / best.entry_px))
+            cost = contracts * best.entry_px
+        else:
+            contracts = contracts_per_trade
+
+        if cost > account:
+            continue
+
+        gross_pnl = contracts * best.pnl
+        fee = _kalshi_fee(contracts, best.entry_px) if best.won and not best.stopped else (
+            0.0035 * contracts * best.entry_px  # regulatory only on losing side
+        )
+        total_fees += fee
+        account   += gross_pnl - fee
+        account    = max(0.0, account)
+        equity.append(account)
+
+    return account, equity, total_fees
+
+
+def print_report(results: List[TradeResult], days: int, account_size: float) -> None:
     if not results:
         print("No signals fired.")
         return
-
-    n       = len(results)
-    wins    = sum(1 for r in results if r.won)
-    stops   = sum(1 for r in results if r.stopped)
-    total   = sum(r.pnl for r in results)
-    avg_pnl = total / n
 
     import datetime
     ts_min = min(r.window_ts for r in results)
@@ -375,69 +431,140 @@ def print_report(results: List[TradeResult], days: int) -> None:
     d_from = datetime.datetime.utcfromtimestamp(ts_min).strftime("%Y-%m-%d")
     d_to   = datetime.datetime.utcfromtimestamp(ts_max).strftime("%Y-%m-%d")
 
-    print(f"\n{'='*60}")
-    print(f"  T2T Backtest Results  ({days}d)  {d_from} → {d_to}")
-    print(f"{'='*60}")
-    print(f"  Signals fired  : {n:,}")
-    print(f"  Win rate       : {wins/n*100:.1f}%  ({wins}/{n})")
-    print(f"  Stopped out    : {stops:,}  ({stops/n*100:.1f}%)")
-    print(f"  Total PnL      : {total:+.4f} contracts")
-    print(f"  Avg PnL/trade  : {avg_pnl:+.4f}")
-    print(f"  Sharpe proxy   : {avg_pnl / (sum((r.pnl - avg_pnl)**2 for r in results)/n)**0.5:.2f}")
+    n       = len(results)
+    wins    = sum(1 for r in results if r.won)
+    stops   = sum(1 for r in results if r.stopped)
+    avg_entry = sum(r.entry_px for r in results) / n
+
+    print(f"\n{'='*62}")
+    print(f"  T2T Backtest  ({days}d  {d_from} → {d_to})")
+    print(f"{'='*62}")
+
+    # ── Signal quality (all strike offsets, not $ amounts) ───────────
+    print(f"\n  SIGNAL ANALYSIS  (all {n:,} signals across all strike offsets)")
+    print(f"  {'─'*50}")
+    print(f"  Win rate      : {wins/n*100:.1f}%  ({wins:,} / {n:,})")
+    print(f"  Stopped out   : {stops:,}  ({stops/n*100:.1f}%)")
+    print(f"  Avg entry     : ${avg_entry:.4f} / contract")
+    print(f"  Avg PnL       : ${sum(r.pnl for r in results)/n:+.4f} / contract  "
+          f"(${sum(r.pnl for r in results)/n * 100:+.2f} per $100 invested per trade)")
 
     # ── EV bins ──────────────────────────────────────────────────────
-    print(f"\n  {'EV range':<14} {'Trades':>7} {'Win%':>7} {'AvgPnL':>9}")
-    print(f"  {'-'*42}")
-    ev_bins = [(0.005, 0.010), (0.010, 0.020), (0.020, 0.050), (0.050, 1.0)]
-    for lo, hi in ev_bins:
+    print(f"\n  {'EV range':<14} {'N':>6} {'Win%':>7} {'$/contract':>12} {'Entry$':>8}")
+    print(f"  {'─'*52}")
+    for lo, hi in [(0.005, 0.010), (0.010, 0.020), (0.020, 0.050), (0.050, 1.0)]:
         sub = [r for r in results if lo <= r.ev < hi]
         if not sub:
             continue
-        w = sum(1 for r in sub if r.won)
-        label = f"{lo:.3f}–{hi:.3f}"
-        print(f"  {label:<14} {len(sub):>7} {w/len(sub)*100:>6.1f}% {sum(r.pnl for r in sub)/len(sub):>+9.4f}")
+        w    = sum(1 for r in sub if r.won)
+        apnl = sum(r.pnl for r in sub) / len(sub)
+        aent = sum(r.entry_px for r in sub) / len(sub)
+        print(f"  {lo:.3f}–{hi:.3f}     {len(sub):>6} {w/len(sub)*100:>6.1f}% "
+              f"  {apnl:>+10.4f}   ${aent:.3f}")
 
-    # ── By secs remaining at entry ────────────────────────────────────
-    print(f"\n  {'Secs at entry':<14} {'Trades':>7} {'Win%':>7} {'AvgPnL':>9}")
-    print(f"  {'-'*42}")
-    for secs in [120.0, 60.0]:
-        sub = [r for r in results if r.secs == secs]
+    # ── By distance from target ───────────────────────────────────────
+    print(f"\n  {'Distance':<12} {'N':>6} {'Win%':>7} {'$/contract':>12}  {'p_reach':>8}")
+    print(f"  {'─'*50}")
+    for lo, hi in [(0, 1), (1, 2), (2, 3), (3, 999)]:
+        sub = [r for r in results
+               if lo <= abs(r.btc_entry - r.target) / max(r.sigma * math.sqrt(2.0 * r.secs), 1e-9) < hi]
         if not sub:
             continue
-        w = sum(1 for r in sub if r.won)
-        print(f"  {int(secs):<14} {len(sub):>7} {w/len(sub)*100:>6.1f}% {sum(r.pnl for r in sub)/len(sub):>+9.4f}")
-
-    # ── By strike distance (in σ units) ──────────────────────────────
-    print(f"\n  {'Distance (σ)':<14} {'Trades':>7} {'Win%':>7} {'AvgPnL':>9}  {'p_reach':>8}")
-    print(f"  {'-'*52}")
-    sigma_bins = [(0, 1), (1, 2), (2, 3), (3, 999)]
-    for lo, hi in sigma_bins:
-        sub = []
-        for r in results:
-            dist_sigma = abs(r.btc_entry - r.target) / (r.sigma * math.sqrt(2.0 * r.secs)) if r.sigma > 0 else 0
-            if lo <= dist_sigma < hi:
-                sub.append(r)
-        if not sub:
-            continue
-        w   = sum(1 for r in sub if r.won)
-        pr  = sum(r.p_reach for r in sub) / len(sub)
+        w  = sum(1 for r in sub if r.won)
+        pr = sum(r.p_reach for r in sub) / len(sub)
         lbl = f"{lo}σ–{hi if hi < 999 else '∞'}σ"
-        print(f"  {lbl:<14} {len(sub):>7} {w/len(sub)*100:>6.1f}% {sum(r.pnl for r in sub)/len(sub):>+9.4f}  {pr:>8.4f}")
+        print(f"  {lbl:<12} {len(sub):>6} {w/len(sub)*100:>6.1f}% "
+              f"  {sum(r.pnl for r in sub)/len(sub):>+10.4f}  {pr:>8.4f}")
 
-    # ── EV model calibration ──────────────────────────────────────────
-    print(f"\n  EV calibration (predicted p_win vs actual win rate):")
-    print(f"  {'p_win bucket':<16} {'Predicted':>10} {'Actual':>10} {'N':>6}")
-    print(f"  {'-'*46}")
-    buckets = [(0.5, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 0.95), (0.95, 1.01)]
-    for lo, hi in buckets:
-        sub = [r for r in results if lo <= (1 - r.p_reach) < hi]
+    # ── Portfolio simulation ($account, 1 trade per window, FLAT sizing) ──
+    # Contracts are fixed from initial capital — no compounding.
+    # One trade per 15-min window: the highest-EV strike for that window.
+    from collections import defaultdict
+    by_window: dict[int, List[TradeResult]] = defaultdict(list)
+    for r in results:
+        by_window[r.window_ts].append(r)
+    ordered_windows = sorted(by_window.keys())
+
+    # Pre-select the best trade per window so we can summarise it independently
+    best_per_window = [max(by_window[ts], key=lambda r: r.ev) for ts in ordered_windows]
+    best_win_rate   = sum(1 for b in best_per_window if b.pnl > 0) / max(len(best_per_window), 1)
+    best_avg_entry  = sum(b.entry_px for b in best_per_window) / max(len(best_per_window), 1)
+    best_avg_pnl_c  = sum(b.pnl for b in best_per_window) / max(len(best_per_window), 1)
+
+    # The key data for the portfolio: per-trade edge expressed clearly in $.
+    # 30-day totals are shown but de-emphasised: at 96 trades/day the
+    # absolute P&L from flat-bet runs grows linearly and mainly reflects
+    # trade frequency, not per-trade edge.  Real trading frequency with
+    # T2T is much lower (1–3 qualifying markets per hour, not 96).
+    print(f"\n  PORTFOLIO SIMULATION  (${account_size:.0f} starting · flat sizing · 1 trade/window)")
+    print(f"  {'─'*54}")
+    print(f"  ⚠  Synthetic GBM data — entry prices derived from the same")
+    print(f"  model being tested. Real Kalshi prices differ; treat as")
+    print(f"  an upper-bound calibration check, not a return forecast.")
+    print()
+    print(f"  Trade selection : highest-EV strike per 15-min window")
+    print(f"  Windows tested  : {len(best_per_window):,}  ({len(best_per_window)/days:.0f}/day · one per 15 min)")
+    print(f"  Avg entry price : ${best_avg_entry:.4f} / contract")
+    print(f"  Win rate (pnl>0): {best_win_rate*100:.1f}%")
+    print(f"  Edge / contract : ${best_avg_pnl_c:+.4f}  (avg PnL per contract traded)")
+
+    # Show per-trade dollar amounts for a range of contract counts,
+    # then derive 30-day totals as a consequence — not the headline.
+    print(f"\n  Per-trade dollar results at different position sizes:")
+    print(f"  {'─'*54}")
+    print(f"  {'Contracts':>10}  {'Cost/trade':>11}  {'Avg win':>9}  {'Avg loss':>9}  {'Edge/trade':>11}")
+    for n_contracts in [1, 10, 50, 100]:
+        cost = n_contracts * best_avg_entry
+        if cost > account_size * 1.05:   # skip if requires more than account
+            continue
+        avg_win_t  = n_contracts * sum(b.pnl for b in best_per_window if b.pnl > 0) / max(sum(1 for b in best_per_window if b.pnl > 0), 1)
+        avg_loss_t = n_contracts * sum(b.pnl for b in best_per_window if b.pnl <= 0) / max(sum(1 for b in best_per_window if b.pnl <= 0), 1)
+        edge       = n_contracts * best_avg_pnl_c
+        print(f"  {n_contracts:>10}  ${cost:>9.2f}  ${avg_win_t:>+8.2f}  ${avg_loss_t:>+8.2f}  ${edge:>+10.2f}")
+
+    # 30-day totals for the most practical sizing (fits in $account_size)
+    practical_contracts = max(1, int(account_size * 0.95 / best_avg_entry))
+    total_gross = sum(practical_contracts * b.pnl for b in best_per_window)
+    total_fees  = sum(
+        _kalshi_fee(practical_contracts, b.entry_px) if b.pnl > 0
+        else 0.0035 * practical_contracts * b.entry_px
+        for b in best_per_window
+    )
+    net   = total_gross - total_fees
+    equity = [account_size]
+    running = account_size
+    for b in best_per_window:
+        running += practical_contracts * b.pnl - (
+            _kalshi_fee(practical_contracts, b.entry_px) if b.pnl > 0
+            else 0.0035 * practical_contracts * b.entry_px
+        )
+        equity.append(running)
+    dd = _max_drawdown_pct(equity)
+
+    print(f"\n  30-day totals @ {practical_contracts} contracts/trade  (${practical_contracts * best_avg_entry:.2f}/trade, fits in ${account_size:.0f}):")
+    print(f"    Gross P&L  : ${total_gross:+,.2f}")
+    print(f"    Fees (est.): -${total_fees:,.2f}")
+    print(f"    Net P&L    : ${net:+,.2f}")
+    print(f"    Max drawdown: {dd:.2f}%")
+    print(f"    Daily avg  : ${net/days:+,.2f}/day  (assumes every window is traded)")
+    print(f"  * Real T2T fires far fewer times than 1/window; scale daily avg")
+    print(f"    down proportionally to your actual observed firing frequency.")
+
+    # ── EV calibration ───────────────────────────────────────────────
+    print(f"\n  EV CALIBRATION  (model's p_win vs actual win rate)")
+    print(f"  {'p_win bucket':<14} {'Predicted':>10} {'Actual':>10} {'N':>7}")
+    print(f"  {'─'*46}")
+    for lo, hi in [(0.50, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 0.95), (0.95, 1.01)]:
+        sub = [r for r in results if lo <= (1.0 - r.p_reach) < hi]
         if not sub:
             continue
         pred = sum(1.0 - r.p_reach for r in sub) / len(sub)
         act  = sum(1 for r in sub if r.won) / len(sub)
-        print(f"  {lo:.2f}–{min(hi,1.0):.2f}           {pred:>10.3f} {act:>10.3f} {len(sub):>6}")
+        print(f"  {lo:.2f}–{min(hi,1.0):.2f}         {pred:>10.3f} {act:>10.3f} {len(sub):>7}")
+    print(f"  Note: model uses ever-touch probability (erfc); actual outcome")
+    print(f"  is final-price, so model is conservative by ~2× near the boundary.")
 
-    print(f"\n{'='*60}\n")
+    print(f"\n{'='*62}\n")
 
 
 # ── Entry point ────────────────────────────────────────────────────────
@@ -447,11 +574,12 @@ def main() -> None:
     parser.add_argument("--days",      type=int,   default=30,   help="Days of history (default 30)")
     parser.add_argument("--min-ev",    type=float, default=None, help="Override MIN_EV threshold")
     parser.add_argument("--spread",    type=float, default=0.01, help="Assumed market spread (default 0.01)")
+    parser.add_argument("--account",   type=float, default=100,  help="Starting account size in $ (default 100)")
     parser.add_argument("--synthetic", action="store_true",      help="Force synthetic GBM data")
     args = parser.parse_args()
 
     effective_min_ev = args.min_ev if args.min_ev is not None else MIN_EV
-    print(f"Config: days={args.days}  min_ev={effective_min_ev}  spread={args.spread}")
+    print(f"Config: days={args.days}  min_ev={effective_min_ev}  spread={args.spread}  account=${args.account:.0f}")
 
     if args.synthetic:
         candles_1min = generate_synthetic_candles(args.days)
@@ -466,7 +594,7 @@ def main() -> None:
         sys.exit(1)
 
     results = run_backtest(candles_1min, STRIKE_PCT_OFFSETS, args.spread, effective_min_ev)
-    print_report(results, args.days)
+    print_report(results, args.days, args.account)
 
 
 if __name__ == "__main__":
