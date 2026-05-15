@@ -15,6 +15,9 @@ For each 15-minute window in the history:
 Usage:
   python scripts/backtest_t2t.py --days 30
   python scripts/backtest_t2t.py --days 7 --min-ev 0.01 --spread 0.01
+
+Strike offsets default to ≥0.5% (≥$500 at $100k BTC), matching real Kalshi
+KXBTC15M spacing where entry is almost always capped at MAX_WINNING_ASK ($0.95).
 """
 
 from __future__ import annotations
@@ -43,9 +46,12 @@ SYNTHETIC_BTC_START   = 100_000.0  # starting BTC price for synthetic mode
 SYNTHETIC_SIGMA_DAILY = 0.025      # 2.5% daily vol — realistic for BTC
 
 # Strike prices as % offsets from BTC open price (positive = target above open).
-# Includes tight offsets (0.10–0.25%) to test the EV gate's lower boundary.
-STRIKE_PCT_OFFSETS = [-1.5, -1.0, -0.75, -0.5, -0.25, -0.15, -0.10,
-                       0.10,  0.15,  0.25,  0.5,  0.75,  1.0,  1.5]
+# Real Kalshi KXBTC15M strikes are spaced ~$500–$1000 apart at $100k BTC.
+# At T-120s with σ≈8.5 $/s, distances >$187 cap entry at MAX_WINNING_ASK ($0.95).
+# These offsets (0.5–2.0% = $500–$2000 at $100k) reflect the realistic regime
+# where T2T fires with BTC well clear of the nearest unfulfilled strike.
+STRIKE_PCT_OFFSETS = [-2.0, -1.5, -1.0, -0.75, -0.5,
+                       0.5,  0.75,  1.0,  1.5,  2.0]
 
 
 # ── Data structures ────────────────────────────────────────────────────
@@ -498,9 +504,9 @@ def print_report(results: List[TradeResult], days: int, account_size: float) -> 
     # T2T is much lower (1–3 qualifying markets per hour, not 96).
     print(f"\n  PORTFOLIO SIMULATION  (${account_size:.0f} starting · flat sizing · 1 trade/window)")
     print(f"  {'─'*54}")
-    print(f"  ⚠  Synthetic GBM data — entry prices derived from the same")
-    print(f"  model being tested. Real Kalshi prices differ; treat as")
-    print(f"  an upper-bound calibration check, not a return forecast.")
+    print(f"  ⚠  Synthetic GBM data. Strike offsets ≥0.5% (≥$500 at $100k)")
+    print(f"  match real Kalshi spacing — entries capped at $0.95 in this")
+    print(f"  regime. Outcome model is conservative (erfc = ever-touch).")
     print()
     print(f"  Trade selection : highest-EV strike per 15-min window")
     print(f"  Windows tested  : {len(best_per_window):,}  ({len(best_per_window)/days:.0f}/day · one per 15 min)")
