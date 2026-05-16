@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 MAX_ENTRY_SECS     = 120   # only enter in the last 2 minutes of the contract
 MIN_SECS_TO_FILL   = 3     # need at least 3s remaining after entry
 MAX_WINNING_ASK    = 0.95  # winning side must be below this (market under-pricing certainty)
-FIXED_RISK         = 0.02  # stop = entry - FIXED_RISK
+FIXED_RISK         = 0.01  # stop = entry - FIXED_RISK
 
 # ── EV / diffusion model parameters ──────────────────────────────────
 BTC_SIGMA_CANDLES  = 20    # number of 15m candles for realized-vol estimate (~5 hours)
