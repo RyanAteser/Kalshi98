@@ -53,6 +53,10 @@ SYNTHETIC_SIGMA_DAILY = 0.025      # 2.5% daily vol — realistic for BTC
 STRIKE_PCT_OFFSETS = [-2.0, -1.5, -1.0, -0.75, -0.5,
                        0.5,  0.75,  1.0,  1.5,  2.0]
 
+# Stop-loss levels evaluated by --sweep-stops.
+# None = hold to expiry (full premium at risk).
+STOP_LOSS_SWEEP: List[Optional[float]] = [0.01, 0.02, 0.03, 0.05, 0.10, None]
+
 
 # ── Data structures ────────────────────────────────────────────────────
 
@@ -95,8 +99,8 @@ def _p_reach(btc_current: float, btc_target: float, secs: float, sigma: float) -
     return math.erfc(distance / denom) if denom > 0 else 0.0
 
 
-def _ev(p_reach: float, entry_px: float) -> float:
-    return (1.0 - p_reach) * (1.0 - entry_px) - p_reach * FIXED_RISK
+def _ev(p_reach: float, entry_px: float, stop_loss: float) -> float:
+    return (1.0 - p_reach) * (1.0 - entry_px) - p_reach * stop_loss
 
 
 # ── Data fetching ─────────────────────────────────────────────────────
@@ -246,6 +250,7 @@ def simulate_window(
         target:            float,
         market_spread:     float,
         min_ev_override:   float,
+        stop_loss:         Optional[float],  # None = hold to expiry, no mid-trade exit
 ) -> Optional[TradeResult]:
     """
     Simulate one 15-minute market window against one strike price.
@@ -253,11 +258,13 @@ def simulate_window(
     Ticks: t-120s (window_1min[-2]) and t-60s (window_1min[-1]).
     The engine fires on the first tick that clears the EV gate.
     Stop is checked at every subsequent tick before close.
+    stop_loss=None means no exit before expiry; a wrong-side close costs
+    the full entry premium.
     """
     if len(window_1min) < 2:
         return None
 
-    btc_close  = window_1min[-1].close
+    btc_close    = window_1min[-1].close
     sigma_newest = list(reversed(sigma_candles_15m[-BTC_SIGMA_CANDLES:]))
 
     # Ticks available in the final 2 minutes: (candle, secs_remaining)
@@ -272,39 +279,41 @@ def simulate_window(
             continue
 
         winning_side = "YES" if btc_current > target else "NO"
-        sigma  = _sigma_per_sec(sigma_newest, btc_current)
-        pr     = _p_reach(btc_current, target, secs, sigma)
-        # Simulated ask = fair value + half the market spread, capped at MAX_WINNING_ASK
+        sigma    = _sigma_per_sec(sigma_newest, btc_current)
+        pr       = _p_reach(btc_current, target, secs, sigma)
         entry_px = min((1.0 - pr) + market_spread, MAX_WINNING_ASK)
-        ev_val   = _ev(pr, entry_px)
 
+        # EV gate: risk is the stop amount (or full premium if no stop)
+        ev_risk = stop_loss if stop_loss is not None else entry_px
+        ev_val  = _ev(pr, entry_px, ev_risk)
         if ev_val < min_ev_override:
             continue
 
         # ── Stop check at each subsequent tick ─────────────────────────
-        # Remaining ticks between entry and close
         subsequent = tick_pairs[t_idx + 1:]
-        stopped = False
-        stop_bid = entry_px - FIXED_RISK  # we stop when bid falls to here
+        stopped    = False
 
-        for rem_candle, rem_secs in subsequent:
-            pr_rem      = _p_reach(rem_candle.close, target, rem_secs, sigma)
-            implied_bid = (1.0 - pr_rem) - market_spread   # what we could sell at
-            if implied_bid <= stop_bid:
-                stopped = True
-                break
+        if stop_loss is not None:
+            stop_bid = entry_px - stop_loss
+            for rem_candle, rem_secs in subsequent:
+                pr_rem      = _p_reach(rem_candle.close, target, rem_secs, sigma)
+                implied_bid = (1.0 - pr_rem) - market_spread
+                if implied_bid <= stop_bid:
+                    stopped = True
+                    break
 
         # ── Resolution ─────────────────────────────────────────────────
         won = (btc_close > target) if winning_side == "YES" else (btc_close < target)
 
         if stopped:
-            pnl = -FIXED_RISK
+            pnl = -stop_loss
         elif won:
             pnl = 1.0 - entry_px
         else:
-            # BTC crossed target without stop firing (sudden end-of-market move)
-            # Conservative: assume stop executes for the standard loss
-            pnl = -FIXED_RISK
+            # Wrong side at expiry.
+            # With stop: we were unlucky (BTC crossed in final seconds); treat as stop.
+            # Without stop: full premium loss.
+            pnl = -stop_loss if stop_loss is not None else -entry_px
 
         return TradeResult(
             window_ts=window_1min[0].ts,
@@ -328,10 +337,11 @@ def simulate_window(
 # ── Backtest runner ────────────────────────────────────────────────────
 
 def run_backtest(
-        candles_1min:  List[Candle],
+        candles_1min:   List[Candle],
         strike_offsets: List[float],
         market_spread:  float,
         min_ev:         float,
+        stop_loss:      Optional[float] = FIXED_RISK,
 ) -> List[TradeResult]:
     candles_15m = aggregate_15min(candles_1min)
     if len(candles_15m) < BTC_SIGMA_CANDLES + 2:
@@ -343,19 +353,20 @@ def run_backtest(
 
     for i in range(BTC_SIGMA_CANDLES, n_windows):
         window_15m = candles_15m[i]
-        # Match the 15 corresponding 1-min candles
         win_start = window_15m.ts
         win_end   = win_start + MARKET_DURATION_SEC
         window_1min = [c for c in candles_1min if win_start <= c.ts < win_end]
         if len(window_1min) < 2:
             continue
 
-        sigma_candles = candles_15m[i - BTC_SIGMA_CANDLES: i]  # oldest→newest
+        sigma_candles = candles_15m[i - BTC_SIGMA_CANDLES: i]
         btc_open      = window_15m.open
 
         for pct in strike_offsets:
             target = btc_open * (1.0 + pct / 100.0)
-            result = simulate_window(window_1min, sigma_candles, target, market_spread, min_ev)
+            result = simulate_window(
+                window_1min, sigma_candles, target, market_spread, min_ev, stop_loss
+            )
             if result is not None:
                 results.append(result)
 
@@ -573,19 +584,117 @@ def print_report(results: List[TradeResult], days: int, account_size: float) -> 
     print(f"\n{'='*62}\n")
 
 
+# ── Stop-loss sweep ────────────────────────────────────────────────────
+
+def print_stop_sweep(
+        candles_1min:  List[Candle],
+        market_spread: float,
+        min_ev:        float,
+        account:       float,
+        days:          int,
+) -> None:
+    """
+    Run the backtest for each entry in STOP_LOSS_SWEEP and print a
+    side-by-side comparison table.
+
+    For each stop-loss level the simulation re-runs fully so the EV gate
+    (which also uses stop_loss as the risk term) is evaluated consistently.
+    """
+    from collections import defaultdict
+
+    # Fixed contract count: how many contracts fit in the account at ~$0.95 entry
+    contracts = max(1, int(account * 0.95 / MAX_WINNING_ASK))
+
+    col_w = 76
+    print(f"\n{'='*col_w}")
+    print(f"  STOP-LOSS SWEEP  ({days}d · ${account:.0f} account · {contracts} contracts · realistic spacing)")
+    print(f"  All entries near ${MAX_WINNING_ASK:.2f} cap (BTC ≥$500 from strike).")
+    print(f"  Win = ${{1-entry:.2f}}/c  |  Loss = stop amount or full premium (None).")
+    print(f"{'='*col_w}")
+    hdr = (f"  {'Stop':>6}  {'Signals':>8}  {'Win%':>6}  {'Stops':>6}  "
+           f"{'Avg Entry':>10}  {'Edge/c':>8}  {'Net/30d':>10}  {'MaxDD%':>7}  {'R:R':>6}")
+    print(f"\n{hdr}")
+    print(f"  {'─'*72}")
+
+    for sl in STOP_LOSS_SWEEP:
+        results = run_backtest(candles_1min, STRIKE_PCT_OFFSETS, market_spread, min_ev, sl)
+        if not results:
+            continue
+
+        n      = len(results)
+        wins   = sum(1 for r in results if r.won)
+        stops  = sum(1 for r in results if r.stopped)
+        avg_e  = sum(r.entry_px for r in results) / n
+
+        # Portfolio: best EV per window, flat sizing
+        by_window: dict[int, List[TradeResult]] = defaultdict(list)
+        for r in results:
+            by_window[r.window_ts].append(r)
+
+        best_per = [max(v, key=lambda r: r.ev) for v in by_window.values()]
+        gross    = sum(contracts * b.pnl for b in best_per)
+        fees     = sum(
+            _kalshi_fee(contracts, b.entry_px) if b.pnl > 0
+            else 0.0035 * contracts * b.entry_px
+            for b in best_per
+        )
+        net = gross - fees
+
+        equity  = [account]
+        running = account
+        for b in best_per:
+            running += contracts * b.pnl - (
+                _kalshi_fee(contracts, b.entry_px) if b.pnl > 0
+                else 0.0035 * contracts * b.entry_px
+            )
+            equity.append(max(0.0, running))
+        dd = _max_drawdown_pct(equity)
+
+        edge_c = sum(r.pnl for r in results) / n
+        win_px = MAX_WINNING_ASK  # entry cap in this regime
+
+        # Risk:Reward ratio (stop / avg win per contract)
+        avg_win_per_c = sum(r.pnl for r in results if r.pnl > 0) / max(sum(1 for r in results if r.pnl > 0), 1)
+        if sl is not None and avg_win_per_c > 0:
+            rr_str = f"1:{avg_win_per_c/sl:.1f}"
+        elif sl is None:
+            rr_str = f"1:{avg_win_per_c/win_px:.2f}"
+        else:
+            rr_str = "—"
+
+        sl_label = f"${sl:.2f}" if sl is not None else "None"
+        print(
+            f"  {sl_label:>6}  {n:>8,}  {wins/n*100:>5.1f}%  {stops:>6,}  "
+            f"  ${avg_e:>7.4f}  {edge_c:>+7.4f}  ${net:>+9,.0f}  {dd:>6.2f}%  {rr_str:>6}"
+        )
+
+    print(f"\n  ⚠  Synthetic data; 30d net assumes every 15-min window is traded.")
+    print(f"     Scale by actual T2T firing frequency for real projections.")
+    print(f"     'None' stop = hold to expiry; wrong-side close = full premium lost.\n")
+    print(f"{'='*col_w}\n")
+
+
 # ── Entry point ────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest T2T EV signal engine")
-    parser.add_argument("--days",      type=int,   default=30,   help="Days of history (default 30)")
-    parser.add_argument("--min-ev",    type=float, default=None, help="Override MIN_EV threshold")
-    parser.add_argument("--spread",    type=float, default=0.01, help="Assumed market spread (default 0.01)")
-    parser.add_argument("--account",   type=float, default=100,  help="Starting account size in $ (default 100)")
-    parser.add_argument("--synthetic", action="store_true",      help="Force synthetic GBM data")
+    parser.add_argument("--days",        type=int,   default=30,   help="Days of history (default 30)")
+    parser.add_argument("--min-ev",      type=float, default=None, help="Override MIN_EV threshold")
+    parser.add_argument("--spread",      type=float, default=0.01, help="Assumed market spread (default 0.01)")
+    parser.add_argument("--account",     type=float, default=100,  help="Starting account size in $ (default 100)")
+    parser.add_argument("--stop-loss",   type=float, default=None, help="Stop-loss per contract in $ (default 0.02)")
+    parser.add_argument("--sweep-stops", action="store_true",      help="Compare all stop-loss levels in a table")
+    parser.add_argument("--synthetic",   action="store_true",      help="Force synthetic GBM data")
     args = parser.parse_args()
 
     effective_min_ev = args.min_ev if args.min_ev is not None else MIN_EV
-    print(f"Config: days={args.days}  min_ev={effective_min_ev}  spread={args.spread}  account=${args.account:.0f}")
+    effective_sl     = args.stop_loss if args.stop_loss is not None else FIXED_RISK
+
+    if args.sweep_stops:
+        print(f"Config: days={args.days}  min_ev={effective_min_ev}  spread={args.spread}  account=${args.account:.0f}  mode=sweep-stops")
+    else:
+        print(f"Config: days={args.days}  min_ev={effective_min_ev}  spread={args.spread}  "
+              f"account=${args.account:.0f}  stop_loss=${effective_sl:.2f}")
 
     if args.synthetic:
         candles_1min = generate_synthetic_candles(args.days)
@@ -599,8 +708,11 @@ def main() -> None:
         print("Insufficient candle data — aborting.")
         sys.exit(1)
 
-    results = run_backtest(candles_1min, STRIKE_PCT_OFFSETS, args.spread, effective_min_ev)
-    print_report(results, args.days, args.account)
+    if args.sweep_stops:
+        print_stop_sweep(candles_1min, args.spread, effective_min_ev, args.account, args.days)
+    else:
+        results = run_backtest(candles_1min, STRIKE_PCT_OFFSETS, args.spread, effective_min_ev, effective_sl)
+        print_report(results, args.days, args.account)
 
 
 if __name__ == "__main__":
