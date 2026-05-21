@@ -175,10 +175,7 @@ class RiskManager:
             )
             # Insufficient cash cooldown — prevents per-tick balance polling spam
             self._order_cooldown[signal.ticker] = time.time() + 30.0
-            try:
-                self._signal_engine._simple96.mark_cooldown(signal.ticker, 30.0)
-            except Exception:
-                pass
+            self._signal_engine.mark_cooldown(signal.ticker, 30.0)
             return
 
         # ── Optimistic lock ───────────────────────────────────────────
@@ -242,13 +239,8 @@ class RiskManager:
             self._signal_engine.mark_position_closed(signal.ticker)
             self._local_open_tickers.discard(signal.ticker)
 
-            # Also tell the engine directly to stop spamming signals
-            try:
-                self._signal_engine._simple96.mark_cooldown(
-                    signal.ticker, self.FAILED_ORDER_COOLDOWN,
-                )
-            except Exception:
-                pass   # older engines won't have this method
+            # Tell the engine to stop spamming signals during cooldown
+            self._signal_engine.mark_cooldown(signal.ticker, self.FAILED_ORDER_COOLDOWN)
 
             logger.info(
                 "[%s] Cooldown set for %.0fs",

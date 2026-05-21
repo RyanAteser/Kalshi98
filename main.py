@@ -1,33 +1,40 @@
 """
-main.py — Entry point for the Kalshi momentum trading system.
+main.py — Entry point for the Kalshi EV Grid Filter trading system.
 
 Startup sequence:
   1. Load config from environment
   2. Initialize DB + schema
-  3. Fetch active sports markets
-  4. Start one MarketWorker per market
-  5. Block until KeyboardInterrupt, then graceful shutdown
+  3. Start Binance data feeds (spot + futures)
+  4. Start BTC candle feed (Coinbase, for candle_boost)
+  5. Wire feeds into EV signal engine via router
+  6. Fetch active sports markets from Kalshi
+  7. Start one MarketWorker per market
+  8. Start portfolio poller
+  9. Block until KeyboardInterrupt, then graceful shutdown
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import signal
 import sys
 import time
-from typing import Optional
 
 from dotenv import load_dotenv
 from pykalshi import KalshiClient
 
+from core.btc_feed import BtcFeed
+import core.binance_feed as binance_feed_module
+import core.binance_futures_feed as binance_futures_feed_module
 from core.config import load_config
 from core.execution_engine import ExecutionEngine
 from core.market_fetcher import fetch_active_sports_markets
+from core.portfolio_poller import PortfolioPoller
+from core.position_sizer import PositionSizer
 from core.risk_manager import RiskManager
 from core.shadow_tracker import ShadowTracker
 from core.shadow_vol_tracker import ShadowVolTracker
-from core.signal_engine import SignalEngine
+from core.signal_engine_router import SignalEngineRouter
 from core.worker import MarketWorker
 from db.db import Database
 
@@ -54,25 +61,48 @@ def main() -> None:
 
     logger = logging.getLogger(__name__)
     logger.info(
-        "Starting Kalshi Trader | paper_mode=%s max_markets=%d",
+        "Starting Kalshi EV Grid Filter | paper_mode=%s  max_markets=%d  "
+        "grid=[%.2f, %.2f]  min_ev=%.4f",
         config.paper_trade, config.max_markets,
+        config.ev_grid_min, config.ev_grid_max, config.ev_min_entry,
     )
 
-    # ── Database ─────────────────────────────────────────────────────
+    # ── Database ──────────────────────────────────────────────────────
     db = Database()
     db.create_schema()
 
-    # ── Kalshi client ────────────────────────────────────────────────
+    # ── Kalshi client ─────────────────────────────────────────────────
     client = KalshiClient.from_env()
 
-    # ── Core components ──────────────────────────────────────────────
-    signal_engine = SignalEngine(config)
+    # ── Data feeds ────────────────────────────────────────────────────
+    btc_feed     = BtcFeed()
+    btc_feed.start()
+    logger.info("BTC candle feed started (Coinbase 15m)")
+
+    binance_feed         = binance_feed_module.get_instance()
+    binance_futures_feed = binance_futures_feed_module.get_instance()
+    logger.info("Binance spot + futures feeds starting...")
+
+    # Give feeds a moment to receive first data
+    time.sleep(2)
+
+    # ── Signal engine ─────────────────────────────────────────────────
+    router = SignalEngineRouter(config)
+    router.set_ev_engine(btc_feed, binance_feed, binance_futures_feed)
+
+    # ── Execution + risk ──────────────────────────────────────────────
     execution_engine = ExecutionEngine(client, config)
-    risk_manager = RiskManager(db, signal_engine, execution_engine, config, client)
+    risk_manager     = RiskManager(db, router, execution_engine, config, client)
     risk_manager.set_shadow_tracker(ShadowTracker(db))
     risk_manager.set_shadow_vol_tracker(ShadowVolTracker(db))
 
-    # ── Fetch markets ────────────────────────────────────────────────
+    # ── Portfolio poller ──────────────────────────────────────────────
+    sizer  = PositionSizer(db=db)
+    poller = PortfolioPoller(client=client, signal_engine=router, db=db, sizer=sizer)
+    poller.start()
+    risk_manager.set_poller(poller)
+
+    # ── Fetch markets ─────────────────────────────────────────────────
     markets = []
     while not markets:
         markets = fetch_active_sports_markets(client, config)
@@ -80,13 +110,12 @@ def main() -> None:
             logger.warning("No live binary sports markets found — retrying in 60s...")
             time.sleep(60)
 
-    # ── Upsert markets into DB + start workers ───────────────────────
+    # ── Upsert markets + start workers ────────────────────────────────
     workers: list[MarketWorker] = []
 
     for m in markets:
-        ticker = m["ticker"]
-        event = m.get("event", "")
-
+        ticker    = m["ticker"]
+        event     = m.get("event", "")
         market_id = db.upsert_market(ticker, event)
 
         worker = MarketWorker(
@@ -94,7 +123,7 @@ def main() -> None:
             ticker=ticker,
             market_id=market_id,
             db=db,
-            signal_engine=signal_engine,
+            signal_engine=router,
             risk_manager=risk_manager,
             config=config,
         )
@@ -104,21 +133,22 @@ def main() -> None:
 
     logger.info("All %d workers running. Press Ctrl+C to stop.", len(workers))
 
-    # ── Graceful shutdown ────────────────────────────────────────────
+    # ── Graceful shutdown ─────────────────────────────────────────────
     def shutdown(sig, frame) -> None:
-        logger.info("Shutdown signal received. Stopping workers...")
+        logger.info("Shutdown signal received. Stopping...")
+        poller.stop()
         for w in workers:
             w.stop()
-        # Give threads a moment to exit cleanly
+        btc_feed.stop()
         for w in workers:
             w.join(timeout=3.0)
+        poller.join(timeout=5.0)
         logger.info("Shutdown complete.")
         sys.exit(0)
 
-    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGINT,  shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    # Keep main thread alive
     while True:
         alive = sum(1 for w in workers if w.is_alive())
         logger.debug("Workers alive: %d/%d", alive, len(workers))

@@ -218,7 +218,7 @@ class MarketWorker(threading.Thread):
     def _on_tick(self, price: float, bid: Optional[float], ask: Optional[float], vol: Optional[float]) -> None:
         try:
             self._db.insert_tick(self._market_id, bid, ask, price, vol)
-            sig = self._signal_engine.process_tick(self._ticker, self._market_id, price, bid, ask)
+            sig = self._signal_engine.process_tick(self._ticker, self._market_id, price, bid, ask, vol)
             if sig:
                 self._risk_manager.handle_signal(sig, bid, ask)
             self._risk_manager.shadow_tick(self._ticker, bid, ask)

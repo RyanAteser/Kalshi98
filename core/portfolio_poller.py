@@ -141,26 +141,26 @@ class PortfolioPoller(threading.Thread):
             else:
                 pos_id = self._db.open_position(
                     market_id=market_id,
-                    entry_price=entry_px or 0.97,
+                    entry_price=entry_px or 0.65,
                     quantity=qty,
-                    stop_loss=0.90,
+                    stop_loss=round((entry_px or 0.65) - 0.02, 6),
                 )
 
-            e96 = self._signal_engine._simple96
-            with e96._lock:
-                e96._has_position    = True
-                e96._position_ticker = ticker
-                e96._position_side   = side
-                e96._entry_price     = entry_px or 0.97
-                e96._position_id     = pos_id
+            # Use the router's public interface to register the orphan
+            self._signal_engine.mark_position_open(
+                ticker=ticker,
+                position_id=pos_id,
+                entry_price=entry_px or 0.65,
+                side=side,
+            )
 
-            # Also arm grace period so we don't immediately try to close
+            # Arm grace period so we don't immediately try to close
             self._position_opened_at[ticker] = time.time()
 
             logger.info(
                 "[%s] Adopted: id=%d side=%s entry=%.4f qty=%d",
-                ticker, pos_id, side, entry_px or 0.97, qty,
-                                      )
+                ticker, pos_id, side, entry_px or 0.65, qty,
+            )
 
         except Exception as exc:
             logger.error("[%s] Failed to adopt orphan: %s", ticker, exc)
@@ -206,19 +206,12 @@ class PortfolioPoller(threading.Thread):
 
     def _get_engine_open_tickers(self) -> Set[str]:
         open_tickers: Set[str] = set()
-
-        e96 = self._signal_engine._simple96
-        if e96._has_position and e96._position_ticker:
-            open_tickers.add(e96._position_ticker)
-
-        for ticker, state in self._signal_engine._momentum._states.items():
-            if state.has_position:
+        ev = getattr(self._signal_engine, "_ev", None)
+        if ev is None:
+            return open_tickers
+        for ticker, st in ev._states.items():
+            if st.has_position:
                 open_tickers.add(ticker)
-
-        for ticker, state in self._signal_engine._resolution._states.items():
-            if state.has_position:
-                open_tickers.add(ticker)
-
         return open_tickers
 
     # ── Kalshi positions with diagnostic logging ────────────────────
