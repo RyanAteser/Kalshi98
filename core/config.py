@@ -18,12 +18,19 @@ class Config:
     # Database
     database_url: str
 
-    # Strategy
-    entry_threshold: float       # price >= this → consider entry (e.g. 0.50)
-    stop_loss: float             # price <= this → force exit (e.g. 0.48)
-    max_spread: float            # skip market if ask - bid > this (e.g. 0.10)
-    min_liquidity_dollars: float # skip if orderbook depth < this (e.g. 5.0)
-    position_size: int           # contracts per trade
+    # Legacy strategy params (kept for any remaining references)
+    entry_threshold: float
+    stop_loss: float
+    max_spread: float
+    min_liquidity_dollars: float
+    position_size: int
+
+    # EV Grid Filter strategy
+    ev_grid_min:  float   # lower price bound for entry (e.g. 0.50)
+    ev_grid_max:  float   # upper price bound for entry (e.g. 0.80)
+    ev_min_entry: float   # minimum EV to open a position (e.g. 0.005)
+    ev_min_exit:  float   # auto-exit when EV drops below this (e.g. -0.003)
+    ev_fee_rate:  float   # Kalshi fee approximation for EV formula (e.g. 0.007)
 
     # Concurrency
     max_markets: int             # max simultaneous market workers
@@ -61,6 +68,11 @@ def load_config() -> Config:
         max_spread=get_float("MAX_SPREAD", 0.10),
         min_liquidity_dollars=get_float("MIN_LIQUIDITY_DOLLARS", 5.0),
         position_size=get_int("POSITION_SIZE", 1),
+        ev_grid_min=get_float("EV_GRID_MIN", 0.50),
+        ev_grid_max=get_float("EV_GRID_MAX", 0.80),
+        ev_min_entry=get_float("EV_MIN_ENTRY", 0.005),
+        ev_min_exit=get_float("EV_MIN_EXIT", -0.003),
+        ev_fee_rate=get_float("EV_FEE_RATE", 0.007),
         max_markets=get_int("MAX_MARKETS", 10),
         worker_restart_delay=get_float("WORKER_RESTART_DELAY", 5.0),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
